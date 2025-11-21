@@ -1,6 +1,6 @@
-   {
-       "apiKey": "Paste your LBank API Key here",
-       "apiSecret": "Paste your LBank API Secret here",
-       "telegramBotToken": "1234567890:ABCDefGhIjkLmnoPQRstuVWxyz" 
-   }
+{
+    "apiKey": "Paste your LBank API Key here",
+    "apiSecret": "Paste your LBank API Secret here",
+    "telegramBotToken": "7565436021:AAHHzoXwyJ9piF3ik3nC5jRljvLaxPuCUuA"
+}
 
