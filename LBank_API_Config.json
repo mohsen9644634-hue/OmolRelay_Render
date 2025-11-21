@@ -1,4 +1,4 @@
 {
-  "API_KEY": "Paste your LBank API Key here",
-  "API_SECRET": "Paste your LBank API Secret here"
+    "apiKey": "Paste your LBank API Key here",
+    "apiSecret": "Paste your LBank API Secret here"
 }
