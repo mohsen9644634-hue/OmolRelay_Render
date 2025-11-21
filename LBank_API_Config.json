@@ -1,4 +1,5 @@
 {
     "apiKey": "Paste your LBank API Key here",
-    "apiSecret": "Paste your LBank API Secret here"
+    "apiSecret": "Paste your LBank API Secret here",
+    "telegramBotToken": "Paste your Telegram Bot Token here"
 }
