@@ -18,7 +18,7 @@ app = Flask(__name__)
 
 
 def send_order(symbol, side, quantity):
-url = "https://api.lbank.info/v2/futures/order"
+    url = "https://api.lbank.info/v2/futures/order"
 
     payload = {
         "symbol": symbol,
