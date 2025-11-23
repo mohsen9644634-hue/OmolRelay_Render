@@ -1,10 +1,11 @@
-import os
-import json
-import requests
 import telebot
 from flask import Flask, request
+import json
+import requests
+import os
 
 # Load API config
+
 with open("LBank_API_Config.json", "r") as cfg:
     api_config = json.load(cfg)
 
@@ -15,9 +16,10 @@ TELEGRAM_TOKEN = api_config["telegramBotToken"]
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 app = Flask(__name__)
 
-# Simple order sender to LBank Futures
+
 def send_order(symbol, side, quantity):
-    url = "https://www.lbank.com/api/v2/futures/order"
+url = "https://api.lbank.info/v2/futures/order"
+
     payload = {
         "symbol": symbol,
         "side": side,  # BUY or SELL
@@ -55,5 +57,4 @@ def index():
     return "OmolRelay Service Running ⚡", 200
 
 if __name__ == "__main__":
-    bot.remove_webhook()
-    bot.polling(none_stop=True)
+    app.run(host="0.0.0.0", port=10000)
