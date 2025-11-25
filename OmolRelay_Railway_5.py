@@ -45,7 +45,7 @@ def handle_order(msg):
     bot.reply_to(msg, str(resp))
 
 # Webhook for Render
-@app.route("/" + TELEGRAM_TOKEN, methods=['POST'])
+@app.route("/telegram", methods=['POST'])
 def webhook():
     json_str = request.get_data().decode('UTF-8')
     update = telebot.types.Update.de_json(json.loads(json_str))
