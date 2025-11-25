@@ -36,6 +36,7 @@ def send_order(symbol, side, quantity):
 # Telegram handler
 @bot.message_handler(commands=['order'])
 def handle_order(msg):
+    print("⚙️ handle_order triggered:", msg.text)
     parts = msg.text.split()
     if len(parts) != 4:
         bot.reply_to(msg, "فرمت صحیح: /order SYMBOL SIDE QTY")
@@ -48,6 +49,9 @@ def handle_order(msg):
 @app.route("/telegram", methods=['POST'])
 def webhook():
     json_str = request.get_data().decode('UTF-8')
+    
+    print("📩 Received update:", update.message.text if update.message else "No text")
+
     update = telebot.types.Update.de_json(json.loads(json_str))
     bot.process_new_updates([update])
     return "OK", 200
