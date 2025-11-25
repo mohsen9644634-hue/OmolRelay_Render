@@ -49,10 +49,9 @@ def handle_order(msg):
 @app.route("/telegram", methods=['POST'])
 def webhook():
     json_str = request.get_data().decode('UTF-8')
-    
+    update = telebot.types.Update.de_json(json.loads(json_str))
     print("📩 Received update:", update.message.text if update.message else "No text")
 
-    update = telebot.types.Update.de_json(json.loads(json_str))
     bot.process_new_updates([update])
     return "OK", 200
 
