@@ -1,4 +1,5 @@
+fastapi
+uvicorn
 requests
-python-telegram-bot
-pyTelegramBotAPI
-flask
+h11
+python-multipart
