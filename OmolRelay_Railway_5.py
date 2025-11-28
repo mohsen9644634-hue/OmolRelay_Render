@@ -1,97 +1,161 @@
 import os
-import json
+import time
+import hmac
+import hashlib
 import httpx
 from fastapi import FastAPI, Request
 
 app = FastAPI()
 
+# ---------------------------
+# Environment Variables
+# ---------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+LBANK_API_KEY = os.getenv("LBANK_API_KEY")
+LBANK_API_SECRET = os.getenv("LBANK_API_SECRET")
+
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+LBANK_BASE = "https://www.lbkex.net"
+SYMBOL = "BTCUSDT"
 
 
-# -----------------------------
-# SEND MESSAGE
-# -----------------------------
+# ---------------------------
+# Telegram Sender
+# ---------------------------
 async def send_message(chat_id, text):
-    url = f"{TELEGRAM_API}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        try:
-            r = await client.post(url, json=payload)
-            print("📨 send_message response →", r.text)
-        except Exception as e:
-            print("❌ send_message error:", e)
+    url = f"{BASE_URL}/sendMessage"
+    data = {"chat_id": chat_id, "text": text}
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, json=data)
+        return r.text
 
 
-# -----------------------------
-# HANDLE /PING
-# -----------------------------
-async def handle_ping(chat_id):
-    await send_message(chat_id, "Pong! Relay working!")
+# ---------------------------
+# LBank Signature
+# ---------------------------
+def lbank_sign(params: dict):
+    keys = sorted(params.keys())
+    query = "&".join([f"{k}={params[k]}" for k in keys])
+    sign = hmac.new(
+        LBANK_API_SECRET.encode(),
+        query.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    return sign
 
 
-# -----------------------------
-# HANDLE /ORDER
-# -----------------------------
-async def handle_order(chat_id, text):
-    try:
-        order = text.replace("/order", "").strip()
-        if not order:
-            await send_message(chat_id, "❌ Order is empty!")
-            return
+# ---------------------------
+# Create Order (Market)
+# ---------------------------
+async def lbank_order(side: str, amount: float):
+    endpoint = "/v2/upp/order/create"
+    url = LBANK_BASE + endpoint
 
-        await send_message(chat_id, f"✅ Order received:\n{order}")
+    ts = int(time.time() * 1000)
 
-    except Exception as e:
-        print("❌ handle_order error:", e)
-        await send_message(chat_id, "ERR\n" + str(e))
+    body = {
+        "api_key": LBANK_API_KEY,
+        "symbol": SYMBOL,
+        "type": "market",
+        "side": side,
+        "amount": str(amount),
+        "timestamp": ts
+    }
+
+    body["sign"] = lbank_sign(body)
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, json=body)
+        return r.json()
 
 
-# -----------------------------
-# TELEGRAM WEBHOOK HANDLER
-# -----------------------------
+# ---------------------------
+# Close Position
+# ---------------------------
+async def lbank_close():
+    endpoint = "/v2/upp/order/close"
+    url = LBANK_BASE + endpoint
+
+    ts = int(time.time() * 1000)
+
+    body = {
+        "api_key": LBANK_API_KEY,
+        "symbol": SYMBOL,
+        "timestamp": ts
+    }
+
+    body["sign"] = lbank_sign(body)
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, json=body)
+        return r.json()
+
+
+# ---------------------------
+# Telegram Webhook
+# ---------------------------
 @app.post("/telegram")
 async def telegram_webhook(request: Request):
-    data = await request.json()
-    print("📩 Raw update:", data)
+    update = await request.json()
 
-    # Extract message safely
     try:
-        message = data["message"]
-        chat_id = message["chat"]["id"]
+        message = update.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
         text = message.get("text", "")
-    except Exception as e:
-        print("❌ Cannot parse update:", e)
+
+        if not text:
+            return {"ok": True}
+
+        # ---- /ping ----
+        if text == "/ping":
+            await send_message(chat_id, "Pong! Relay working! ⚡️")
+            return {"ok": True}
+
+        # ---- /help ----
+        if text == "/help":
+            help_msg = (
+                "/ping → تست ربات\n"
+                "/order long 10 → ورود لانگ\n"
+                "/order short 10 → ورود شورت\n"
+                "/close → بستن پوزیشن\n"
+            )
+            await send_message(chat_id, help_msg)
+            return {"ok": True}
+
+        # ---- /order ----
+        if text.startswith("/order"):
+            parts = text.split()
+            if len(parts) != 3:
+                await send_message(chat_id, "فرمت صحیح: /order long 10")
+                return {"ok": True}
+
+            _, direction, amount_str = parts
+            direction = direction.lower()
+
+            if direction not in ["long", "short"]:
+                await send_message(chat_id, "نوع باید long یا short باشد.")
+                return {"ok": True}
+
+            try:
+                amount = float(amount_str)
+            except:
+                await send_message(chat_id, "عدد حجم معتبر نیست.")
+                return {"ok": True}
+
+            side = "buy" if direction == "long" else "sell"
+            result = await lbank_order(side, amount)
+
+            await send_message(chat_id, f"نتیجه سفارش:\n{result}")
+            return {"ok": True}
+
+        # ---- /close ----
+        if text == "/close":
+            result = await lbank_close()
+            await send_message(chat_id, f"نتیجه بستن پوزیشن:\n{result}")
+            return {"ok": True}
+
         return {"ok": True}
 
-    print(f"👉 chat_id={chat_id} | text='{text}'")
-
-    # Commands
-    if text.startswith("/ping"):
-        await handle_ping(chat_id)
-
-    elif text.startswith("/order"):
-        await handle_order(chat_id, text)
-
-    else:
-        await send_message(chat_id, "Unknown command")
-
-    return {"ok": True}
-
-
-# -----------------------------
-# ROOT
-# -----------------------------
-@app.get("/")
-async def home():
-    return {"status": "OK", "relay": "running"}
-
-
-# -----------------------------
-# START
-# -----------------------------
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    except Exception as e:
+        # جلوگیری از Crash خاموش
+        return {"ok": True, "error": str(e)}
