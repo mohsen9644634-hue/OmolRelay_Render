@@ -7,155 +7,141 @@ from fastapi import FastAPI, Request
 
 app = FastAPI()
 
-# ---------------------------
-# Environment Variables
-# ---------------------------
+# ----------------------------
+# Environment
+# ----------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 LBANK_API_KEY = os.getenv("LBANK_API_KEY")
 LBANK_API_SECRET = os.getenv("LBANK_API_SECRET")
 
-BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-LBANK_BASE = "https://www.lbkex.net"
-SYMBOL = "BTCUSDT"
+LBANK_BASE = "https://api.lbkex.com"
 
 
-# ---------------------------
-# Telegram Sender
-# ---------------------------
+# ----------------------------
+# Telegram Send Message
+# ----------------------------
 async def send_message(chat_id, text):
-    url = f"{BASE_URL}/sendMessage"
-    data = {"chat_id": chat_id, "text": text}
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     async with httpx.AsyncClient() as client:
-        r = await client.post(url, json=data)
-        return r.text
+        await client.post(url, data={"chat_id": chat_id, "text": text})
 
 
-# ---------------------------
-# LBank Signature
-# ---------------------------
-def lbank_sign(params: dict):
-    keys = sorted(params.keys())
-    query = "&".join([f"{k}={params[k]}" for k in keys])
-    sign = hmac.new(
-        LBANK_API_SECRET.encode(),
-        query.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    return sign
+# ----------------------------
+# LBank Signature (v2)
+# ----------------------------
+def lbank_sign(params: dict) -> dict:
+    params["api_key"] = LBANK_API_KEY
+    params["timestamp"] = int(time.time() * 1000)
+
+    items = sorted(params.items())
+    sign_string = "".join([f"{k}{v}" for k, v in items]) + LBANK_API_SECRET
+    signature = hashlib.md5(sign_string.encode()).hexdigest()
+
+    params["sign"] = signature
+    return params
 
 
-# ---------------------------
-# Create Order (Market)
-# ---------------------------
-async def lbank_order(side: str, amount: float):
-    endpoint = "/v2/upp/order/create"
-    url = LBANK_BASE + endpoint
+# ----------------------------
+# Create Order (Open Position)
+# ----------------------------
+async def lbank_order(direction: str, amount: float):
+    url = f"{LBANK_BASE}/v2/future/order/create"
 
-    ts = int(time.time() * 1000)
-
-    body = {
-        "api_key": LBANK_API_KEY,
-        "symbol": SYMBOL,
+    params = {
+        "symbol": "BTCUSDT",
+        "size": amount,
         "type": "market",
-        "side": side,
-        "amount": str(amount),
-        "timestamp": ts
+        "side": 1 if direction == "long" else 2,
+        "leverage": 25,
+        "open_type": "isolated"
     }
 
-    body["sign"] = lbank_sign(body)
+    signed = lbank_sign(params)
 
     async with httpx.AsyncClient() as client:
-        r = await client.post(url, json=body)
+        r = await client.post(url, data=signed)
         return r.json()
 
 
-# ---------------------------
-# Close Position
-# ---------------------------
+# ----------------------------
+# Close Position (Reduce-Only)
+# ----------------------------
 async def lbank_close():
-    endpoint = "/v2/upp/order/close"
-    url = LBANK_BASE + endpoint
+    url = f"{LBANK_BASE}/v2/future/order/create"
 
-    ts = int(time.time() * 1000)
-
-    body = {
-        "api_key": LBANK_API_KEY,
-        "symbol": SYMBOL,
-        "timestamp": ts
+    params = {
+        "symbol": "BTCUSDT",
+        "size": 9999,              # close ALL
+        "type": "market",
+        "side": 3,                 # reduce only
+        "reduce_only": True
     }
 
-    body["sign"] = lbank_sign(body)
+    signed = lbank_sign(params)
 
     async with httpx.AsyncClient() as client:
-        r = await client.post(url, json=body)
+        r = await client.post(url, data=signed)
         return r.json()
 
 
-# ---------------------------
+# ----------------------------
 # Telegram Webhook
-# ---------------------------
+# ----------------------------
 @app.post("/telegram")
 async def telegram_webhook(request: Request):
     update = await request.json()
+    print("RAW Telegram Update:", update)
 
     try:
-        message = update.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
-        text = message.get("text", "")
+        msg = update["message"]
+        chat_id = msg["chat"]["id"]
+        text = msg.get("text", "")
+    except:
+        return {"ok": True}
 
-        if not text:
-            return {"ok": True}
+    # -----------------------------------------
+    # /ping
+    # -----------------------------------------
+    if text == "/ping":
+        await send_message(chat_id, "Pong! Relay working! ⚡️")
+        return {"ok": True}
 
-        # ---- /ping ----
-        if text == "/ping":
-            await send_message(chat_id, "Pong! Relay working! ⚡️")
-            return {"ok": True}
+    # -----------------------------------------
+    # /order long 10
+    # /order short 10
+    # /order close
+    # -----------------------------------------
+    if text.startswith("/order"):
+        parts = text.split()
 
-        # ---- /help ----
-        if text == "/help":
-            help_msg = (
-                "/ping → تست ربات\n"
-                "/order long 10 → ورود لانگ\n"
-                "/order short 10 → ورود شورت\n"
-                "/close → بستن پوزیشن\n"
-            )
-            await send_message(chat_id, help_msg)
-            return {"ok": True}
-
-        # ---- /order ----
-        if text.startswith("/order"):
-            parts = text.split()
-            if len(parts) != 3:
-                await send_message(chat_id, "فرمت صحیح: /order long 10")
-                return {"ok": True}
-
-            _, direction, amount_str = parts
+        # Long / Short with amount
+        if len(parts) == 3:
+            _, direction, amount = parts
             direction = direction.lower()
 
             if direction not in ["long", "short"]:
-                await send_message(chat_id, "نوع باید long یا short باشد.")
+                await send_message(chat_id, "Direction must be: long | short")
                 return {"ok": True}
 
             try:
-                amount = float(amount_str)
+                amount = float(amount)
             except:
-                await send_message(chat_id, "عدد حجم معتبر نیست.")
+                await send_message(chat_id, "Amount must be a number")
                 return {"ok": True}
 
-            side = "buy" if direction == "long" else "sell"
-            result = await lbank_order(side, amount)
-
-            await send_message(chat_id, f"نتیجه سفارش:\n{result}")
+            await send_message(chat_id, f"Executing {direction.upper()} x{amount} ...")
+            result = await lbank_order(direction, amount)
+            await send_message(chat_id, f"LBank Response:\n{result}")
             return {"ok": True}
 
-        # ---- /close ----
-        if text == "/close":
+        # Close position
+        if len(parts) == 2 and parts[1] == "close":
+            await send_message(chat_id, "Closing position...")
             result = await lbank_close()
-            await send_message(chat_id, f"نتیجه بستن پوزیشن:\n{result}")
+            await send_message(chat_id, f"LBank Response:\n{result}")
             return {"ok": True}
 
+        await send_message(chat_id, "Format:\n/order long 10\n/order short 10\n/order close")
         return {"ok": True}
 
-    except Exception as e:
-        # جلوگیری از Crash خاموش
-        return {"ok": True, "error": str(e)}
+    return {"ok": True}
