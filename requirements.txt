@@ -3,3 +3,4 @@ uvicorn
 requests
 h11
 python-multipart
+httpx
