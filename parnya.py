@@ -123,10 +123,3 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(func=execute_trading_strategy, trigger="interval", minutes=15)
 scheduler.start()
 logging.info("⏳ Scheduler started (GLOBAL).")
-
-
-# --- Main App Runner ---
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    logging.info(f"🚀 Flask Running on port {port} ...")
-    app.run(host='0.0.0.0', port=port)
