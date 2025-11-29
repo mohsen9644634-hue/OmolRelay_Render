@@ -1,125 +1,60 @@
-import os
+from flask import Flask, jsonify
+import requests
 import time
 import hmac
 import hashlib
-import requests
-import json
-from flask import Flask, jsonify
-from apscheduler.schedulers.background import BackgroundScheduler
-import logging
-
-# تنظیم لاگ
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+import base64
+import urllib.parse
+import os
 
 app = Flask(__name__)
 
-# --- API KEYS ---
-LBANK_API_KEY = os.environ.get('LBANK_API_KEY')
-LBANK_SECRET_KEY = os.environ.get('LBANK_SECRET_KEY')
+LBANK_API_KEY = os.environ.get("LBANK_API_KEY")
+LBANK_SECRET_KEY = os.environ.get("LBANK_SECRET_KEY")
 
-if not LBANK_API_KEY or not LBANK_SECRET_KEY:
-    logging.error("⚠️ LBANK_API_KEY یا LBANK_SECRET_KEY تنظیم نشده است!")
+# ---------- SIGN FUNCTION ----------
+def sign_request(params, secret):
+    sorted_params = sorted(params.items())
+    encoded_params = urllib.parse.urlencode(sorted_params)
+    message = encoded_params.encode("utf-8")
+    mac = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).digest()
+    return base64.b64encode(mac).decode()
 
-LBANK_FUTURES_BASE_URL = "https://api.lbank.com/v2"
-
-
-# --- Signature ---
-def generate_signature(params: dict) -> str:
-    query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
-    signature = hmac.new(
-        LBANK_SECRET_KEY.encode('utf-8'),
-        query_string.encode('utf-8'),
-        hashlib.sha256
-    ).hexdigest()
-    return signature
-
-
-# --- API Request ---
-def lbank_api_request(method: str, endpoint: str, params: dict = None, signed: bool = False):
-    if params is None:
-        params = {}
-
-    headers = {
-        'Content-Type': 'application/json',
-        'X-LBANK-APIKEY': LBANK_API_KEY
-    }
-
-    if signed:
-        params['timestamp'] = int(time.time() * 1000)
-        params['signature'] = generate_signature(params)
-
-    url = f"{LBANK_FUTURES_BASE_URL}{endpoint}"
-
+# ---------- GET TICKER ----------
+def get_price():
     try:
-        if method == 'GET':
-            response = requests.get(url, params=params, headers=headers)
-        else:
-            response = requests.post(url, json=params, headers=headers)
-
-        response.raise_for_status()
-        response_json = response.json()
-
-        if response_json.get('error_code') not in [None, 0]:
-            logging.error(f"LBank Error: {response_json}")
-            return None
-
-        return response_json
-
-    except Exception as e:
-        logging.error(f"API Request Error: {e}")
+        url = "https://api.lbank.info/v2/ticker.do?symbol=btcusdt"
+        r = requests.get(url, timeout=10).json()
+        return float(r["data"]["ticker"]["latest"])
+    except:
         return None
 
-
-# --- Trading Strategy ---
+# ---------- STRATEGY ----------
 def execute_trading_strategy():
-    logging.info("🔄 اجرای استراتژی فیوچرز BTCUSDT (15m)...")
+    print("🔄 اجرای استراتژی 15m...")
+    price = get_price()
 
-    if not LBANK_API_KEY or not LBANK_SECRET_KEY:
-        logging.warning("کلیدهای API تنظیم نشده‌اند.")
-        return
+    if price is None:
+        print("⛔ قیمت دریافت نشد")
+        return {"status": "error", "msg": "price fetch failed"}
 
-    try:
-        # دریافت آخرین کندل
-        params = {
-            "symbol": "BTCUSDT",
-            "interval": "15min",
-            "size": 1
-        }
-        resp = lbank_api_request('GET', '/futures/kline', params=params)
+    print(f"📊 قیمت فعلی BTCUSDT: {price}")
+    # استراتژی نمایشی
+    if price % 2 == 0:
+        signal = "BUY"
+    else:
+        signal = "SELL"
 
-        if not resp or not resp.get('data'):
-            logging.error("❌ دریافت کندل ناموفق")
-            return
+    print(f"📌 سیگنال: {signal}")
+    return {"status": "ok", "signal": signal, "price": price}
 
-        kline = resp['data'][0]
-        current_price = float(kline[4])
-        logging.info(f"📈 قیمت فعلی: {current_price}")
+# ---------- TRIGGER ENDPOINT ----------
+@app.route("/run-strategy", methods=["GET"])
+def trigger():
+    result = execute_trading_strategy()
+    return jsonify(result)
 
-        # مثال ساده برای تست
-        if current_price < 65000:
-            logging.info("📗 سیگنال لانگ شناسایی شد.")
-        elif current_price > 68000:
-            logging.info("📕 سیگنال شورت شناسایی شد.")
-        else:
-            logging.info("📘 سیگنالی وجود ندارد.")
-
-    except Exception as e:
-        logging.error(f"❌ خطا در استراتژی: {e}")
-
-
-# --- Flask Routes ---
-@app.route('/')
+# ---------- ROOT ----------
+@app.route("/")
 def home():
-    return "ربات معامله‌گر فیوچرز BTCUSDT در حال اجراست ✔️"
-
-
-@app.route('/health')
-def health_check():
-    return jsonify({"status": "healthy", "message": "Bot is active and scheduler is running."})
-
-
-# --- Scheduler (GLOBAL START) ---
-scheduler = BackgroundScheduler()
-scheduler.add_job(func=execute_trading_strategy, trigger="interval", minutes=15)
-scheduler.start()
-logging.info("⏳ Scheduler started (GLOBAL).")
+    return "Robot Online — use /run-strategy to trigger"
