@@ -1,6 +1,2 @@
-fastapi
-uvicorn
-requests
-h11
-python-multipart
-httpx
+        Flask==2.3.2
+
