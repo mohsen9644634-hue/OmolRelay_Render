@@ -132,9 +132,10 @@ def short_signal():
     out = execute_signal("open_short")
     return jsonify(out)
 
+@APP.route("/")
+def home():
+    return "Bot is running ⚡"
 
-if __name__ == "__main__":
-    APP.run(host="0.0.0.0", port=5000)
 app = APP
 
 
