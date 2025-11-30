@@ -1,4 +1,4 @@
-import time
+youimport time
 import hmac
 import hashlib
 import requests
@@ -135,3 +135,6 @@ def short_signal():
 
 if __name__ == "__main__":
     APP.run(host="0.0.0.0", port=5000)
+app = APP
+
+
