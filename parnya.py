@@ -55,6 +55,10 @@ def trigger():
     return jsonify(result)
 
 # ---------- ROOT ----------
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
-    return "Robot Online — use /run-strategy to trigger"
+    return "OK", 200
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
