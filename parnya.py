@@ -147,9 +147,12 @@ def test2():
     return "200 OK", 200
 
 
-@APP.route("/telegram", methods=["GET"])
+@APP.route("/telegram", methods=["POST"])
 def telegram_check2():
-    return "Telegram Webhook Endpoint ✔️", 200
+    data = request.get_json()
+    print("Telegram Message:", data)
+    return jsonify({"status": "received"}), 200
+
 
 app = APP
 
