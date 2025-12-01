@@ -131,11 +131,23 @@ def long_signal():
 def short_signal():
     out = execute_signal("open_short")
     return jsonify(out)
+# ============================
+# Extra Safe Routes for Render
+# ============================
 
 @APP.route("/")
-def home():
-    return "Bot is running ⚡"
+def home2():
+    return "GapGPT Trading Automation is LIVE! ✔️", 200
 
-app = APP
+
+@APP.route("/test")
+def test2():
+    return "200 OK", 200
+
+
+@APP.route("/telegram", methods=["GET"])
+def telegram_check2():
+    return "Telegram Webhook Endpoint ✔️", 200
+
 
 
