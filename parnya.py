@@ -152,10 +152,34 @@ def telegram_check2():
     try:
         data = request.get_json(force=True, silent=True) or {}
         print("Telegram Message:", data)
+
+        message = data.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+        text = message.get("text", "").strip().lower()
+
+        if not chat_id or not text:
+            return jsonify({"status": "ignored"}), 200
+
+        # پاسخ اولیه برای تست
+        reply = f"پیام شما دریافت شد: {text}"
+        send_message(chat_id, reply)
+
         return jsonify({"status": "ok"}), 200
+
     except Exception as e:
         print("ERROR in /telegram:", str(e))
         return jsonify({"error": "server error"}), 200
+def send_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print("ERROR sending message:", str(e))
+
 
 app = APP
 
