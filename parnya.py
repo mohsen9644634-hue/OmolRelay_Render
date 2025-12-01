@@ -13,6 +13,8 @@ SYMBOL = "BTCUSDT_UMCBL"
 MARGIN_MODE = "isolated"
 LEVERAGE = "10"
 APP = Flask(__name__)
+# Telegram Bot Token
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 
 class BitgetAPI:
