@@ -146,7 +146,6 @@ def home2():
 def test2():
     return "200 OK", 200
 
-
 @APP.route("/telegram", methods=["POST"])
 def telegram_check2():
     try:
@@ -160,25 +159,36 @@ def telegram_check2():
         if not chat_id or not text:
             return jsonify({"status": "ignored"}), 200
 
-        # پاسخ اولیه برای تست
-        reply = f"پیام شما دریافت شد: {text}"
-        send_message(chat_id, reply)
+        # ------------------------
+        # فرمان‌های ترکیبی
+        # ------------------------
 
+        # لانگ
+        if text in ["long", "لانگ", "buy", "خرید"]:
+            reply = "فرمان لانگ دریافت شد ✔️\n(فعلاً فقط تست - معامله باز نشد)"
+            send_message(chat_id, reply)
+            return jsonify({"status": "long"}), 200
+
+        # شورت
+        if text in ["short", "شورت", "sell", "فروش"]:
+            reply = "فرمان شورت دریافت شد ✔️\n(فعلاً فقط تست - معامله باز نشد)"
+            send_message(chat_id, reply)
+            return jsonify({"status": "short"}), 200
+
+        # بستن پوزیشن
+        if text in ["close", "ببند", "بستن", "خروج", "close all"]:
+            reply = "فرمان بستن پوزیشن دریافت شد ✔️\n(فعلاً فقط تست - معامله بسته نشد)"
+            send_message(chat_id, reply)
+            return jsonify({"status": "close"}), 200
+
+        # پیام‌های دیگر
+        reply = f"پیام شما دریافت شد: {text}\n(فرمان معتبر نبود)"
+        send_message(chat_id, reply)
         return jsonify({"status": "ok"}), 200
 
     except Exception as e:
         print("ERROR in /telegram:", str(e))
         return jsonify({"error": "server error"}), 200
-def send_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print("ERROR sending message:", str(e))
 
 
 app = APP
