@@ -2,7 +2,7 @@ import time
 import hmac
 import hashlib
 import requests
-from flask import Flask, jsonify
+from flask import Flask, request, jsonify
 import os
 
 API_KEY = os.getenv("BITGET_API_KEY")
