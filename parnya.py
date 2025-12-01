@@ -1,96 +1,150 @@
+from flask import Flask, jsonify
 import os
+import time
+import hmac
+import hashlib
+import json
 import requests
-from flask import Flask, request, jsonify
-
-# ------------------------------------------------------
-# Initialization
-# ------------------------------------------------------
 
 APP = Flask(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+# ===============================
+# ENV VARIABLES
+# ===============================
+BITGET_API_KEY = os.getenv("BITGET_API_KEY")
+BITGET_API_SECRET = os.getenv("BITGET_API_SECRET")
+BITGET_API_PASSPHRASE = os.getenv("BITGET_API_PASSPHRASE")
 
-# ------------------------------------------------------
-# Send Message Function (MUST be above telegram route!)
-# ------------------------------------------------------
 
-def send_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text
+# ===============================
+# BITGET SIGN
+# ===============================
+def bitget_sign(timestamp, method, path, body=""):
+    msg = f"{timestamp}{method}{path}{body}"
+    return hmac.new(
+        BITGET_API_SECRET.encode(),
+        msg.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+
+# ===============================
+# BITGET REQUEST
+# ===============================
+def bitget_request(method, path, body_dict=None):
+    url = f"https://api.bitget.com{path}"
+    timestamp = str(int(time.time() * 1000))
+    body = "" if not body_dict else json.dumps(body_dict)
+
+    headers = {
+        "ACCESS-KEY": BITGET_API_KEY,
+        "ACCESS-SIGN": bitget_sign(timestamp, method, path, body),
+        "ACCESS-TIMESTAMP": timestamp,
+        "ACCESS-PASSPHRASE": BITGET_API_PASSPHRASE,
+        "Content-Type": "application/json"
     }
+
     try:
-        requests.post(url, json=payload)
+        if method == "POST":
+            r = requests.post(url, headers=headers, data=body)
+        else:
+            r = requests.get(url, headers=headers)
+        return r.json()
     except Exception as e:
-        print("ERROR sending message:", str(e))
+        return {"error": str(e)}
 
 
-# ------------------------------------------------------
-# Safe Routes for Render / Health Check
-# ------------------------------------------------------
+# ===============================
+# GET BALANCE
+# ===============================
+def get_balance():
+    r = bitget_request(
+        "GET",
+        "/api/mix/v1/account/accounts?productType=USDT-FUTURES"
+    )
 
+    try:
+        return float(r["data"][0]["available"])
+    except:
+        return 0
+
+
+# ===============================
+# OPEN POSITION
+# ===============================
+def open_position(side):
+    balance = get_balance()
+    if balance <= 0:
+        return {"error": "no balance"}
+
+    body = {
+        "symbol": "BTCUSDT",
+        "marginCoin": "USDT",
+        "size": balance,       # full balance
+        "side": side,          # buy_long OR sell_short
+        "orderType": "market",
+        "marginMode": "isolated",
+        "leverage": "10"
+    }
+
+    return bitget_request(
+        "POST",
+        "/api/mix/v1/order/placeOrder",
+        body
+    )
+
+
+# ===============================
+# CLOSE ALL POSITIONS
+# ===============================
+def close_all():
+    long_close = {
+        "symbol": "BTCUSDT",
+        "marginCoin": "USDT",
+        "holdSide": "long"
+    }
+    short_close = {
+        "symbol": "BTCUSDT",
+        "marginCoin": "USDT",
+        "holdSide": "short"
+    }
+
+    r1 = bitget_request(
+        "POST",
+        "/api/mix/v1/position/closePosition",
+        long_close
+    )
+
+    r2 = bitget_request(
+        "POST",
+        "/api/mix/v1/position/closePosition",
+        short_close
+    )
+
+    return {"long_close": r1, "short_close": r2}
+
+
+# ===============================
+# ROUTES
+# ===============================
 @APP.route("/")
-def home2():
-    return "GapGPT Trading Automation is LIVE! ✔️", 200
+def home():
+    return "ربات Bitget REAL فعال است - بدون تلگرام."
 
 
-@APP.route("/test")
-def test2():
-    return "200 OK", 200
+@APP.route("/long")
+def do_long():
+    return jsonify(open_position("buy_long"))
 
 
-# ------------------------------------------------------
-# Telegram Webhook Receiver
-# ------------------------------------------------------
-
-@APP.route("/telegram", methods=["POST"])
-def telegram_check2():
-    try:
-        data = request.get_json(force=True, silent=True) or {}
-        print("Telegram Message:", data)
-
-        message = data.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
-        text = message.get("text", "").strip().lower()
-
-        if not chat_id or not text:
-            return jsonify({"status": "ignored"}), 200
-
-        # --------------------------------------------------
-        # Combined Commands (English + Persian)
-        # --------------------------------------------------
-
-        # LONG
-        if text in ["long", "لانگ", "buy", "خرید"]:
-            reply = "فرمان لانگ دریافت شد ✔️\n(فعلاً تست - معامله اجرا نشد)"
-            send_message(chat_id, reply)
-            return jsonify({"status": "long"}), 200
-
-        # SHORT
-        if text in ["short", "شورت", "sell", "فروش"]:
-            reply = "فرمان شورت دریافت شد ✔️\n(فعلاً تست - معامله اجرا نشد)"
-            send_message(chat_id, reply)
-            return jsonify({"status": "short"}), 200
-
-        # CLOSE POSITION
-        if text in ["close", "ببند", "بستن", "خروج", "close all"]:
-            reply = "فرمان بستن پوزیشن دریافت شد ✔️\n(فعلاً تست - معامله بسته نشد)"
-            send_message(chat_id, reply)
-            return jsonify({"status": "close"}), 200
-
-        # DEFAULT
-        reply = f"پیام شما دریافت شد: {text}\n(دستور معتبر نبود)"
-        send_message(chat_id, reply)
-        return jsonify({"status": "ok"}), 200
-
-    except Exception as e:
-        print("ERROR in /telegram:", str(e))
-        return jsonify({"error": "server error"}), 200
+@APP.route("/short")
+def do_short():
+    return jsonify(open_position("sell_short"))
 
 
-# ------------------------------------------------------
-# Gunicorn Entry Point
-# ------------------------------------------------------
+@APP.route("/close")
+def do_close():
+    return jsonify(close_all())
+
 
 app = APP
