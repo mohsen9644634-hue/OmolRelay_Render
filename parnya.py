@@ -149,10 +149,13 @@ def test2():
 
 @APP.route("/telegram", methods=["POST"])
 def telegram_check2():
-    data = request.get_json()
-    print("Telegram Message:", data)
-    return jsonify({"status": "received"}), 200
-
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        print("Telegram Message:", data)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        print("ERROR in /telegram:", str(e))
+        return jsonify({"error": "server error"}), 200
 
 app = APP
 
