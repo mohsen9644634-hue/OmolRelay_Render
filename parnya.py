@@ -12,9 +12,9 @@ app = Flask(__name__)
 
 # --- Bitget API Configuration ---
 # You MUST replace these with your actual Bitget API credentials
-API_KEY = "YOUR_BITGET_API_KEY"
-SECRET_KEY = "YOUR_BITGET_SECRET_KEY"
-PASSWORD = "YOUR_BITGET_PASSWORD" # Passphrase for Bitget
+API_KEY = "bg_a050eede5383bd737101f275b5d1670d"
+SECRET_KEY = "9b3c04f592f0c0f2c68dddf78dfc711f8e77523bc3dd4725e37f012eeac4eaf3"
+PASSWORD = "pouya123" # Passphrase for Bitget
 
 BASE_URL = "https://api.bitget.com"
 
