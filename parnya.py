@@ -149,5 +149,6 @@ def test2():
 def telegram_check2():
     return "Telegram Webhook Endpoint ✔️", 200
 
+app = APP
 
 
