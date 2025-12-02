@@ -1,2 +1,3 @@
-        web: python parnya.py
+    web: gunicorn parnya:app
+
 
