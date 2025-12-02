@@ -4,15 +4,13 @@ import time
 import hmac
 import hashlib
 import threading
-import math
-app = Flask(__name__)
 
 # ============================
 #   COINEX API CONFIG
 # ============================
 
-API_KEY = "9702A8DB3E074A45996BAC0E8D85F748"
-SECRET_KEY = "4029D375ED5D17344BB175DF9FB0B36EBC497F5BA389C4C1"
+API_KEY = "YOUR_API_KEY"
+SECRET_KEY = "YOUR_SECRET_KEY"
 
 BASE_URL = "https://api.coinex.com/v1"
 
@@ -22,7 +20,7 @@ BASE_URL = "https://api.coinex.com/v1"
 
 SYMBOL = "BTCUSDT"
 LEVERAGE = 10
-POSITION_SIZE = 5        # اندازه پوزیشن = 5 دلار
+POSITION_SIZE = 5
 
 current_position = "none"
 
@@ -163,14 +161,12 @@ def strategy_loop():
             ema_long = calculate_ema(prices, EMA_LONG)
             rsi = calculate_rsi(prices, RSI_PERIOD)
 
-            # LONG SIGNAL
             if ema_short > ema_long and rsi < 70 and current_position != "long":
                 close_order()
                 set_leverage()
                 place_order("buy")
                 current_position = "long"
 
-            # SHORT SIGNAL
             if ema_short < ema_long and rsi > 30 and current_position != "short":
                 close_order()
                 set_leverage()
@@ -193,6 +189,8 @@ bot_thread.start()
 # ============================
 #   FLASK API
 # ============================
+
+app = Flask(__name__)
 
 @app.route("/")
 def home():
@@ -219,22 +217,19 @@ def close_manual():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-￼Enterfrom flask import Flask, request, jsonify
+Enterfrom flask import Flask, request, jsonify
 import requests
 import time
 import hmac
 import hashlib
 import threading
-import math
-
-app = Flask(__name__)
 
 # ============================
 #   COINEX API CONFIG
 ========================
 
-API_KEY = "9702A8DB3E074A45996BAC0E8D85F748"         
-SECRET_KEY = "4029D375ED5D17344BB175DF9FB0B36EBC497F5BA389C4C1"
+API_KEY = "YOUR_API_KEY"
+SECRET_KEY = "YOUR_SECRET_KEY"
 
 BASE_URL = "https://api.coinex.com/v1"
 
@@ -244,7 +239,7 @@ BASE_URL = "https://api.coinex.com/v1"
 
 SYMBOL = "BTCUSDT"
 LEVERAGE = 10
-POSITION_SIZE = 5        # اندازه پوزیشن = 5 دلار
+POSITION_SIZE = 5
 
 current_position = "none"
 
