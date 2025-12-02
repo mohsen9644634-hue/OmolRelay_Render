@@ -9,8 +9,8 @@ import threading
 #   COINEX API CONFIG
 # ============================
 
-API_KEY = "YOUR_API_KEY"
-SECRET_KEY = "YOUR_SECRET_KEY"
+API_KEY = "9702A8DB3E074A45996BAC0E8D85F748"
+SECRET_KEY = "4029D375ED5D17344BB175DF9FB0B36EBC497F5BA389C4C1"
 
 BASE_URL = "https://api.coinex.com/v1"
 
@@ -56,11 +56,11 @@ def coinex_request(method, path, params=None):
     url = BASE_URL + path
 
     if method == "GET":
-        res = requests.get(url, params=params)
+        response = requests.get(url, params=params)
     else:
-        res = requests.post(url, data=params)
+        response = requests.post(url, data=params)
 
-    return res.json()
+    return response.json()
 
 # ============================
 #   ORDER FUNCTIONS
@@ -154,8 +154,8 @@ def strategy_loop():
 
     while True:
         try:
-            klines = get_kline()
-            prices = [float(c[2]) for c in klines["data"]]
+            data = get_kline()
+            prices = [float(c[2]) for c in data["data"]]
 
             ema_short = calculate_ema(prices, EMA_SHORT)
             ema_long = calculate_ema(prices, EMA_LONG)
@@ -179,7 +179,7 @@ def strategy_loop():
         time.sleep(30)
 
 # ============================
-#   THREAD START
+#   START THREAD
 # ============================
 
 bot_thread = threading.Thread(target=strategy_loop)
@@ -217,117 +217,3 @@ def close_manual():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-Enterfrom flask import Flask, request, jsonify
-import requests
-import time
-import hmac
-import hashlib
-import threading
-
-# ============================
-#   COINEX API CONFIG
-========================
-
-API_KEY = "YOUR_API_KEY"
-SECRET_KEY = "YOUR_SECRET_KEY"
-
-BASE_URL = "https://api.coinex.com/v1"
-
-# ============================
-#   TRADING SETTINGS
-# ============================
-
-SYMBOL = "BTCUSDT"
-LEVERAGE = 10
-POSITION_SIZE = 5
-
-current_position = "none"
-
-# ============================
-#   STRATEGY SETTINGS
-# ============================
-
-EMA_SHORT = 50
-EMA_LONG = 200
-RSI_PERIOD = 14
-
-# ============================
-#   COINEX SIGNATURE
-# ============================
-
-def generate_signature(params):
-    sorted_params = sorted(params.items())
-    query = "&".join([f"{k}={v}" for k, v in sorted_params])
-    return hmac.new(SECRET_KEY.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
-
-# ============================
-#   API REQUESTS
-# ============================
-
-def coinex_request(method, path, params=None):
-    if params is None:
-        params = {}
-
-    params["access_id"] = API_KEY
-    params["tonce"] = int(time.time() * 1000)
-    params["signature"] = generate_signature(params)
-
-    url = BASE_URL + path
-
-    if method == "GET":
-        res = requests.get(url, params=params)
-    else:
-        res = requests.post(url, data=params)
-
-    return res.json()
-
-# ============================
-#   ORDER FUNCTIONS
-# ============================
-
-def set_leverage():
-    params = {
-        "market": SYMBOL,
-        "leverage": LEVERAGE,
-        "position_type": 1
-    }
-    return coinex_request("POST", "/futures/adjust_leverage", params)
-
-def place_order(side):
-    params = {
-        "market": SYMBOL,
-        "type": "market",
-        "amount": POSITION_SIZE,
-        "side": side
-    }
-    return coinex_request("POST", "/futures/order/put_market", params)
-
-def close_order():
-    global current_position
-
-    if current_position == "none":
-        return {"msg": "NO POSITION"}
-
-    opposite = "sell" if current_position == "long" else "buy"
-
-    params = {
-        "market": SYMBOL,
-        "type": "market",
-        "amount": POSITION_SIZE,
-        "side": opposite
-    }
-
-    current_position = "none"
-    return coinex_request("POST", "/futures/order/put_market", params)
-
-# ============================
-#   INDICATORS
-# ============================
-
-def get_kline():
-    url = f"https://api.coinex.com/v1/market/kline?market={SYMBOL}&type=15min&limit=200"
-    return requests.get(url).json()
-
-def calculate_ema(data, period):
-    multiplier = 2 / (period + 1)
-    ema = data[0]
