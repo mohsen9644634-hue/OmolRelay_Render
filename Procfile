@@ -1,3 +1,1 @@
-
-
-
+web: gunicorn parnya:app
