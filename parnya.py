@@ -5,7 +5,6 @@ import hmac
 import hashlib
 import threading
 import math
-
 app = Flask(__name__)
 
 # ============================
