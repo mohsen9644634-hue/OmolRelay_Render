@@ -1,855 +1,1041 @@
-import requests
-import json
+# -*- coding: utf-8 -*-
+import os
 import time
 import hmac
 import hashlib
-import pandas as pd
-import numpy as np
-import threading
-from flask import Flask, jsonify
-
-# ====================================================================
-# 1. تنظیمات و متغیرهای حیاتی
-# ====================================================================
-
-# 🚨🚨🚨 این مقادیر را با کلیدهای واقعی خود جایگزین کنید 🚨🚨🚨
-API_KEY = "9702A8DB3E074A45996BAC0E8D85F748"
-SECRET_KEY = "4029D375ED5D17344BB175DF9FB0B36EBC497F5BA389C4C1"
-
-# Base URL برای CoinEx V2
-BASE_URL = "https://api.coinex.com/v2" 
-# پارامترهای ترید
-SYMBOL = "BTCUSDT"
-TIMEFRAME = "15min" # تایم‌فریم تحلیل
-LEVERAGE = 10 
-TRADE_INTERVAL_SECONDS = 30 # هر 30 ثانیه یک بار اجرا شود
-# پارامترهای اندیکاتور
-EMA_SHORT_PERIOD = 12
-EMA_LONG_PERIOD = 26
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70  # بالای 70 برای LONG ریسک دارد
-RSI_OVERSOLD = 30    # زیر 30 برای SHORT ریسک دارد
-ST_PERIOD = 10
-ST_MULTIPLIER = 3
-
-# ====================================================================
-# 2. مدیریت API CoinEx V2 (شامل ساخت Signature)
-# ====================================================================
-
-def generate_signature(method, path, params, body, timestamp, secret_key):
-    """
-    ساخت HMAC-SHA256 Signature برای CoinEx V2
-    (قانون: timestamp + method + path + body_content)
-    """
-    body_content = json.dumps(body) if body else ""
-    message = f"{timestamp}{method}{path}{body_content}"
-    
-    hashed = hmac.new(secret_key.encode('utf-8'), 
-                       message.encode('utf-8'), 
-                       hashlib.sha256)
-    return hashed.hexdigest()
-
-def make_request(method, path, params=None, body=None):
-    """تابع اصلی برای ارسال درخواست‌های احراز هویت شده"""
-    url = f"{BASE_URL}{path}"
-    timestamp = str(int(time.time() * 1000))
-    
-    if API_KEY == "YOUR_API_KEY_HERE" or SECRET_KEY == "YOUR_SECRET_KEY_HERE":
-        print("❌ CRITICAL: API Key or Secret Key not set.")
-        return None
-        
-    signature = generate_signature(method, path, params, body, timestamp, SECRET_KEY)
-    
-    headers = {
-        'Content-Type': 'application/json',
-        'X-COINEX-KEY': API_KEY,
-        'X-COINEX-SIGNATURE': signature,
-        'X-COINEX-TIMESTAMP': timestamp,
-        'X-COINEX-API-VERSION': 'v2',
-    }
-    
-    try:
-        response = requests.request(method, url, params=params, json=body, headers=headers, timeout=10)
-        response.raise_for_status() 
-        result = response.json()
-        
-        if result.get('code') != 0:
-            print(f"❌ API Call Failed ({path}): Code {result.get('code')}, Message: {result.get('message')}")
-            return None
-        
-        return result
-        
-    except requests.exceptions.RequestException as e:
-        print(f"❌ CoinEx Network Error ({method} {path}): {e}")
-        return None
-
-# ====================================================================
-# 3. توابع محاسبات اندیکاتور
-# ====================================================================
-
-def calculate_indicators(df):
-    """محاسبه EMA، RSI و Supertrend"""
-    
-    # 1. EMA (میانگین متحرک نمایی)
-    df['EMA_Short'] = df['close'].ewm(span=EMA_SHORT_PERIOD, adjust=False).mean()
-    df['EMA_Long'] = df['close'].ewm(span=EMA_LONG_PERIOD, adjust=False).mean()
-
-    # 2. RSI (شاخص قدرت نسبی)
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).fillna(0)
-    loss = (-delta.where(delta < 0, 0)).fillna(0)
-    
-    # محاسبات EWM برای RSI دقیق
-    avg_gain = gain.ewm(com=RSI_PERIOD - 1, min_periods=RSI_PERIOD, adjust=False).mean()
-    avg_loss = loss.ewm(com=RSI_PERIOD - 1, min_periods=RSI_PERIOD, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-
-    # 3. Supertrend (نیازمند ATR)
-    # True Range (TR)
-    df['TR'] = np.maximum.reduce([
-        df['high'] - df['low'], 
-        np.abs(df['high'] - df['close'].shift(1)), 
-        np.abs(df['low'] - df['close'].shift(1))
-    ])
-    # Average True Range (ATR)
-    df['ATR'] = df['TR'].ewm(span=ST_PERIOD, adjust=False).mean()
-
-    # خطوط بیسیک Supertrend
-    df['Basic_Upper'] = (df['high'] + df['low']) / 2 + ST_MULTIPLIER * df['ATR']
-    df['Basic_Lower'] = (df['high'] + df['low']) / 2 - ST_MULTIPLIER * df['ATR']
-
-    # منطق اصلی Supertrend (با رویکرد تکراری برای دقت)
-    df['Supertrend'] = np.nan
-    df['ST_Direction'] = np.nan # 1: Long, -1: Short
-
-    for i in range(1, len(df)):
-        # پیگیری جهت قبلی
-        prev_st_direction = df['ST_Direction'].iloc[i-1]
-        prev_supertrend = df['Supertrend'].iloc[i-1]
-        
-        # تعیین مقدار Supertrend فعلی
-        if df['close'].iloc[i] > prev_supertrend and prev_st_direction == 1:
-            # روند صعودی ادامه دارد، خط از Basic_Lower پیروی می‌کند
-            df.loc[df.index[i], 'Supertrend'] = max(df['Basic_Lower'].iloc[i], prev_supertrend)
-            df.loc[df.index[i], 'ST_Direction'] = 1
-        elif df['close'].iloc[i] < prev_supertrend and prev_st_direction == -1:
-            # روند نزولی ادامه دارد، خط از Basic_Upper پیروی می‌کند
-            df.loc[df.index[i], 'Supertrend'] = min(df['Basic_Upper'].iloc[i], prev_supertrend)
-            df.loc[df.index[i], 'ST_Direction'] = -1
-        elif df['close'].iloc[i] > prev_supertrend and prev_st_direction == -1:
-            # سیگنال برگشت به LONG
-            df.loc[df.index[i], 'Supertrend'] = df['Basic_Lower'].iloc[i]
-            df.loc[df.index[i], 'ST_Direction'] = 1
-        elif df['close'].iloc[i] < prev_supertrend and prev_st_direction == 1:
-            # سیگنال برگشت به SHORT
-            df.loc[df.index[i], 'Supertrend'] = df['Basic_Upper'].iloc[i]
-            df.loc[df.index[i], 'ST_Direction'] = -1
-        else:
-             # اگر جهت قبلی نامشخص باشد یا در محدوده خنثی
-             if np.isnan(prev_st_direction):
-                 df.loc[df.index[i], 'Supertrend'] = df['Basic_Lower'].iloc[i] # شروع با صعودی
-                 df.loc[df.index[i], 'ST_Direction'] = 1
-             else:
-                 # اگر نه صعودی و نه نزولی باشد (در محدوده Supertrend قبلی)
-                 df.loc[df.index[i], 'Supertrend'] = prev_supertrend
-                 df.loc[df.index[i], 'ST_Direction'] = prev_st_direction
-
-    # برای ورودی جدید (ناقص بودن داده‌های اولیه)
-    df.iloc[0:ST_PERIOD, df.columns.get_loc('ST_Direction')] = 1 
-    
-    return df.iloc[ST_PERIOD:] # داده‌های معتبر بعد از دوره ATR
-
-# ====================================================================
-# 4. منطق سیگنال‌گیری نهایی
 import requests
 import json
-import time
-import hmac
-import hashlib
-import pandas as pd
-import numpy as np
-import threading
-from flask import Flask, jsonify
+from datetime import datetime
+from threading import Thread, Event
 
-# ====================================================================
-# 1. تنظیمات و متغیرهای حیاتی
-# ====================================================================
+class CoinExAPI:
+    def __init__(self, api_key, secret_key):
+        self.api_key = api_key
+        self.secret_key = secret_key
+        self.base_url = "https://api.coinex.com/v1"
 
-# 🚨🚨🚨 این مقادیر را با کلیدهای واقعی خود جایگزین کنید 🚨🚨🚨
-API_KEY = "YOUR_API_KEY_HERE"
-SECRET_KEY = "YOUR_SECRET_KEY_HERE"
+    def _sign(self, params):
+        sorted_params = sorted(params.items(), key=lambda x: x[0])
+        param_string = "&".join([f"{k}={v}" for k, v in sorted_params])
+        sign_string = param_string + "&secret_key=" + self.secret_key
+        return hashlib.md5(sign_string.encode()).hexdigest()
 
-# Base URL برای CoinEx V2
-BASE_URL = "https://api.coinex.com/v2" 
-# پارامترهای ترید
-SYMBOL = "BTCUSDT"
-TIMEFRAME = "15min" # تایم‌فریم تحلیل
-LEVERAGE = 10 
-TRADE_INTERVAL_SECONDS = 30 # هر 30 ثانیه یک بار اجرا شود
-# پارامترهای اندیکاتور
-EMA_SHORT_PERIOD = 12
-EMA_LONG_PERIOD = 26
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70  # بالای 70 برای LONG ریسک دارد
-RSI_OVERSOLD = 30    # زیر 30 برای SHORT ریسک دارد
-ST_PERIOD = 10
-ST_MULTIPLIER = 3
-
-# ====================================================================
-# 2. مدیریت API CoinEx V2 (شامل ساخت Signature)
-# ====================================================================
-
-def generate_signature(method, path, params, body, timestamp, secret_key):
-    """
-    ساخت HMAC-SHA256 Signature برای CoinEx V2
-    (قانون: timestamp + method + path + body_content)
-    """
-    body_content = json.dumps(body) if body else ""
-    message = f"{timestamp}{method}{path}{body_content}"
-    
-    hashed = hmac.new(secret_key.encode('utf-8'), 
-                       message.encode('utf-8'), 
-                       hashlib.sha256)
-    return hashed.hexdigest()
-
-def make_request(method, path, params=None, body=None):
-    """تابع اصلی برای ارسال درخواست‌های احراز هویت شده"""
-    url = f"{BASE_URL}{path}"
-    timestamp = str(int(time.time() * 1000))
-    
-    if API_KEY == "YOUR_API_KEY_HERE" or SECRET_KEY == "YOUR_SECRET_KEY_HERE":
-        print("❌ CRITICAL: API Key or Secret Key not set.")
-        return None
+    def _request(self, method, path, params=None, headers=None):
+        if params is None:
+            params = {}
         
-    signature = generate_signature(method, path, params, body, timestamp, SECRET_KEY)
-    
-    headers = {
-        'Content-Type': 'application/json',
-        'X-COINEX-KEY': API_KEY,
-        'X-COINEX-SIGNATURE': signature,
-        'X-COINEX-TIMESTAMP': timestamp,
-        'X-COINEX-API-VERSION': 'v2',
-    }
-    
-    try:
-        response = requests.request(method, url, params=params, json=body, headers=headers, timeout=10)
-        response.raise_for_status() 
-        result = response.json()
+        timestamp = int(time.time() * 1000)
         
-        if result.get('code') != 0:
-            print(f"❌ API Call Failed ({path}): Code {result.get('code')}, Message: {result.get('message')}")
-            return None
-        
-        return result
-        
-    except requests.exceptions.RequestException as e:
-        print(f"❌ CoinEx Network Error ({method} {path}): {e}")
-        return None
-
-# ====================================================================
-# 3. توابع محاسبات اندیکاتور
-# ====================================================================
-
-def calculate_indicators(df):
-    """محاسبه EMA، RSI و Supertrend"""
-    
-    # 1. EMA (میانگین متحرک نمایی)
-    df['EMA_Short'] = df['close'].ewm(span=EMA_SHORT_PERIOD, adjust=False).mean()
-    df['EMA_Long'] = df['close'].ewm(span=EMA_LONG_PERIOD, adjust=False).mean()
-
-    # 2. RSI (شاخص قدرت نسبی)
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).fillna(0)
-    loss = (-delta.where(delta < 0, 0)).fillna(0)
-    
-    # محاسبات EWM برای RSI دقیق
-    avg_gain = gain.ewm(com=RSI_PERIOD - 1, min_periods=RSI_PERIOD, adjust=False).mean()
-    avg_loss = loss.ewm(com=RSI_PERIOD - 1, min_periods=RSI_PERIOD, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-
-    # 3. Supertrend (نیازمند ATR)
-    # True Range (TR)
-    df['TR'] = np.maximum.reduce([
-        df['high'] - df['low'], 
-        np.abs(df['high'] - df['close'].shift(1)), 
-        np.abs(df['low'] - df['close'].shift(1))
-    ])
-    # Average True Range (ATR)
-    df['ATR'] = df['TR'].ewm(span=ST_PERIOD, adjust=False).mean()
-
-    # خطوط بیسیک Supertrend
-    df['Basic_Upper'] = (df['high'] + df['low']) / 2 + ST_MULTIPLIER * df['ATR']
-    df['Basic_Lower'] = (df['high'] + df['low']) / 2 - ST_MULTIPLIER * df['ATR']
-
-    # منطق اصلی Supertrend (با رویکرد تکراری برای دقت)
-    df['Supertrend'] = np.nan
-    df['ST_Direction'] = np.nan # 1: Long, -1: Short
-
-    for i in range(1, len(df)):
-        # پیگیری جهت قبلی
-        prev_st_direction = df['ST_Direction'].iloc[i-1]
-        prev_supertrend = df['Supertrend'].iloc[i-1]
-        
-        # تعیین مقدار Supertrend فعلی
-        if df['close'].iloc[i] > prev_supertrend and prev_st_direction == 1:
-            # روند صعودی ادامه دارد، خط از Basic_Lower پیروی می‌کند
-            df.loc[df.index[i], 'Supertrend'] = max(df['Basic_Lower'].iloc[i], prev_supertrend)
-            df.loc[df.index[i], 'ST_Direction'] = 1
-        elif df['close'].iloc[i] < prev_supertrend and prev_st_direction == -1:
-            # روند نزولی ادامه دارد، خط از Basic_Upper پیروی می‌کند
-            df.loc[df.index[i], 'Supertrend'] = min(df['Basic_Upper'].iloc[i], prev_supertrend)
-            df.loc[df.index[i], 'ST_Direction'] = -1
-        elif df['close'].iloc[i] > prev_supertrend and prev_st_direction == -1:
-            # سیگنال برگشت به LONG
-            df.loc[df.index[i], 'Supertrend'] = df['Basic_Lower'].iloc[i]
-            df.loc[df.index[i], 'ST_Direction'] = 1
-        elif df['close'].iloc[i] < prev_supertrend and prev_st_direction == 1:
-            # سیگنال برگشت به SHORT
-            df.loc[df.index[i], 'Supertrend'] = df['Basic_Upper'].iloc[i]
-            df.loc[df.index[i], 'ST_Direction'] = -1
-        else:
-             # اگر جهت قبلی نامشخص باشد یا در محدوده خنثی
-             if np.isnan(prev_st_direction):
-                 df.loc[df.index[i], 'Supertrend'] = df['Basic_Lower'].iloc[i] # شروع با صعودی
-                 df.loc[df.index[i], 'ST_Direction'] = 1
-             else:
-                 # اگر نه صعودی و نه نزولی باشد (در محدوده Supertrend قبلی)
-                 df.loc[df.index[i], 'Supertrend'] = prev_supertrend
-                 df.loc[df.index[i], 'ST_Direction'] = prev_st_direction
-
-    # برای ورودی جدید (ناقص بودن داده‌های اولیه)
-    df.iloc[0:ST_PERIOD, df.columns.get_loc('ST_Direction')] = 1 
-    
-    return df.iloc[ST_PERIOD:] # داده‌های معتبر بعد از دوره ATR
-
-# ====================================================================
-# 4. منطق سیگنال‌گیری نهایی
-# ====================================================================
-
-def get_final_signal(df):
-    """ترکیب سیگنال‌های EMA Cross، Supertrend و فیلتر RSI"""
-    latest = df.iloc[-1]
-    
-    # 1. سیگنال EMA
-    ema_signal = 0
-    if latest['EMA_Short'] > latest['EMA_Long']:
-        ema_signal = 1 # Long
-    elif latest['EMA_Short'] < latest['EMA_Long']:
-        ema_signal = -1 # Short
-        
-    # 2. سیگنال Supertrend
-    st_signal = latest['ST_Direction']
-    
-    # 3. ترکیب و فیلتر RSI
-    
-    final_signal = "HOLD"
-    
-    if ema_signal == 1 and st_signal == 1:
-        # کاندید LONG: اگر RSI بیش از حد بالا نباشد (Overbought)
-        if latest['RSI'] <= RSI_OVERBOUGHT:
-            final_signal = "LONG"
-        else:
-            # فیلتر RSI فعال شد
-            final_signal = "HOLD" 
-            
-    elif ema_signal == -1 and st_signal == -1:
-        # کاندید SHORT: اگر RSI بیش از حد پایین نباشد (Oversold)
-        if latest['RSI'] >= RSI_OVERSOLD:
-            final_signal = "SHORT"
-        else:
-            # فیلتر RSI فعال شد
-            final_signal = "HOLD"
-            
-    # اگر سیگنال‌های اصلی ضد و نقیض باشند، HOLD می‌کنیم
-    
-    return final_signal
-
-# ====================================================================
-# 5. توابع اجرایی ترید
-# ====================================================================
-
-def get_coinex_data():
-    """دریافت داده‌های کندل (K-Line) از CoinEx"""
-    path = f"/market/kline"
-    params = {
-        'market': SYMBOL,
-        'time_type': TIMEFRAME,
-        'limit': 100 
-    }
-    
-    result = make_request('GET', path, params=params)
-    
-    if result and result.get('code') == 0:
-        data = result['data']['kline']
-        df = pd.DataFrame(data, columns=['ts', 'open', 'close', 'high', 'low', 'amount', 'volume'])
-        # اطمینان از نوع داده عددی
-        for col in ['open', 'close', 'high', 'low', 'amount', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-        df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
-        df = df.set_index('datetime')
-        return df
-    return None
-
-def get_current_balance(ccy="USDT"):
-    """دریافت موجودی قابل استفاده (Available) در حساب Perpetual"""
-    path = "/asset/margin/balance"
-    # برای معاملات Perpetual (فیوچرز) باید موجودی حساب Perpetual را چک کنیم.
-    # در CoinEx V2، این endpoint موجودی‌ها را برمی‌گرداند.
-    
-    result = make_request('GET', path, params={'ccy': ccy})
-    
-    if result and result.get('code') == 0:
-        for asset in result['data']:
-            if asset['ccy'] == ccy:
-                # استفاده از 'available'
-                return float(asset['available'])
-    return 0.0
-
-def get_open_positions():
-    """دریافت لیست پوزیشن‌های باز برای بازار مشخص"""
-    path = "/perpetual/position"
-    params = {'market': SYMBOL}
-    result = make_request('GET', path, params=params)
-    
-    if result and result.get('code') == 0:
-        # فیلتر کردن پوزیشن‌هایی که اندازه آن‌ها واقعاً > 0 است
-        positions = [p for p in result['data'] if float(p['position_size']) > 0]
-        return positions
-    return []
-
-def calculate_amount(balance_usdt, current_price):
-    """محاسبه حجم پوزیشن در واحد BTC بر اساس موجودی کل و لوریج"""
-    
-    if current_price <= 0:
-        return 0.0
-        
-    # محاسبه کل ارزش دلاری که وارد معامله می‌شود
-    total_usdt_value = balance_usdt * LEVERAGE
-    # تبدیل به حجم BTC
-    amount_btc = total_usdt_value / current_price
-    
-    # CoinEx برای BTCUSDT حداقل اندازه 0.0001 دارد.
-    min_btc_amount = 0.0001
-    
-    if amount_btc < min_btc_amount:
-        print(f"⚠️ موجودی کافی برای حداقل حجم معامله {min_btc_amount} BTC وجود ندارد. (Calculated: {amount_btc:.4f})")
-        return 0.0
-        
-    # بازگرداندن با دقت بالا
-    return float(f"{amount_btc:.4f}") 
-
-def close_all_positions(positions):
-    """بستن تمام پوزیشن‌های باز برای SYMBOL مشخص"""
-    
-    # اطمینان از تنظیم لوریج و Isolated قبل از ترید (برای بار اول)
-    set_leverage(LEVERAGE, position_type=1) 
-    
-    closed_count = 0
-    for pos in positions:
-        if float(pos['position_size']) > 0:
-            path = "/perpetual/close_position"
-            body = {
-                'market': SYMBOL,
-                'position_id': pos['position_id'], 
-                'close_type': 'MARKET' # بستن فوری در قیمت بازار
+        if method in ["POST", "PUT", "DELETE"]:
+            # For POST, PUT, DELETE, params are in the body
+            auth_params = {
+                'access_id': self.api_key,
+                'tonce': timestamp,
+                **params
             }
+            sign = self._sign(auth_params)
             
-            close_result = make_request('POST', path, body=body)
-            if close_result:
-                print(f"✅ پوزیشن {pos['side']} با شناسه {pos['position_id']} بسته شد.")
-                closed_count += 1
+            req_headers = {
+                'User-Agent': 'CoinEx-API-Client/1.0.0',
+                'Content-Type': 'application/json',
+                'ACCESS-ID': self.api_key,
+                'ACCESS-SIGN': sign,
+                'ACCESS-TONCE': str(timestamp)
+            }
+            if headers:
+                req_headers.update(headers)
+            
+            response = requests.request(method, self.base_url + path, json=params, headers=req_headers)
+        else: # GET
+            # For GET, params are in the query string
+            auth_params = {
+                'access_id': self.api_key,
+                'tonce': timestamp,
+                **params
+            }
+            sign = self._sign(auth_params)
+            
+            req_headers = {
+                'User-Agent': 'CoinEx-API-Client/1.0.0',
+                'ACCESS-ID': self.api_key,
+                'ACCESS-SIGN': sign,
+                'ACCESS-TONCE': str(timestamp)
+            }
+            if headers:
+                req_headers.update(headers)
+                
+            response = requests.request(method, self.base_url + path, params=params, headers=req_headers)
+            
+        return response.json()
+
+    def get_market_depth(self, market, limit=5, merge="0"):
+        path = "/market/depth"
+        params = {
+            "market": market,
+            "limit": limit,
+            "merge": merge
+        }
+        return self._request("GET", path, params=params)
+
+    def get_kline(self, market, type="15min", limit=100):
+        path = "/market/kline"
+        params = {
+            "market": market,
+            "type": type,
+            "limit": limit
+        }
+        return self._request("GET", path, params=params)
+
+    def get_account_info(self):
+        path = "/balance_info"
+        return self._request("GET", path)
+
+    def get_position_info(self, market="BTCUSDT"):
+        path = "/contract/position"
+        params = {"market": market}
+        return self._request("GET", path, params=params)
+
+    def get_ticker(self, market="BTCUSDT"):
+        path = "/market/ticker"
+        params = {"market": market}
+        return self._request("GET", path, params=params)
+
+    def place_order(self, market, type, side, price, amount, leverage=10, client_id=""):
+        path = "/order/limit"
+        params = {
+            "access_id": self.api_key,
+            "market": market,
+            "type": type, # "limit" or "market" (for spot, for contract it's usually limit)
+            "side": side, # "buy" or "sell"
+            "price": str(price),
+            "amount": str(amount),
+            "source_id": client_id,
+            "leverage": leverage
+        }
+        return self._request("POST", path, params=params)
+
+    def cancel_order(self, market, order_id):
+        path = "/order/cancel"
+        params = {
+            "access_id": self.api_key,
+            "market": market,
+            "order_id": order_id
+        }
+        return self._request("POST", path, params=params)
+    
+    def get_open_orders(self, market="BTCUSDT", offset=0, limit=100):
+        path = "/order/pending"
+        params = {
+            "market": market,
+            "offset": offset,
+            "limit": limit
+        }
+        return self._request("GET", path, params=params)
+
+class Bot:
+    def __init__(self, api_key, secret_key, market="BTCUSDT", leverage=10, timeframe="15min"):
+        self.coinex = CoinExAPI(api_key, secret_key)
+        self.market = market
+        self.leverage = leverage
+        self.timeframe = timeframe
+        self.stop_event = Event()
+        self.trade_thread = None
+        self.min_btc_amount = 0.0001 # CoinEx BTCUSDT minimum order amount
+
+    def get_candlestick_data(self):
+        klines_data = self.coinex.get_kline(market=self.market, type=self.timeframe, limit=200)
+        if klines_data and klines_data['code'] == 0:
+            candles = []
+            for kline in klines_data['data']:
+                candles.append({
+                    "timestamp": kline[0],
+                    "open": float(kline[1]),
+                    "close": float(kline[2]),
+                    "high": float(kline[3]),
+                    "low": float(kline[4]),
+                    "volume": float(kline[5])
+                })
+            return candles
+        return None
+
+    def calculate_ema(self, prices, period):
+        if not prices:
+            return []
+        ema_values = [sum(prices[:period]) / period]
+        multiplier = 2 / (period + 1)
+        for i in range(period, len(prices)):
+            ema = (prices[i] - ema_values[-1]) * multiplier + ema_values[-1]
+            ema_values.append(ema)
+        return ema_values
+
+    def calculate_rsi(self, prices, period=14):
+        if len(prices) < period:
+            return None
+
+        gains = []
+        losses = []
+        for i in range(1, len(prices)):
+            change = prices[i] - prices[i-1]
+            if change > 0:
+                gains.append(change)
+                losses.append(0)
             else:
-                print(f"❌ خطای بستن پوزیشن {pos['position_id']}.")
-                # بهتر است ادامه دهیم تا بقیه هم بسته شوند
-                
-    return closed_count == len(positions)
+                gains.append(0)
+                losses.append(abs(change))
 
-def set_leverage(leverage, position_type=1):
-    """تنظیم لوریج و نوع پوزیشن (1: Isolated)"""
-    path_leverage = "/perpetual/position/adjust_leverage"
-    leverage_body = {
-        'market': SYMBOL,
-        'leverage': leverage,
-        'position_type': position_type 
-    }
-    leverage_result = make_request('POST', path_leverage, body=leverage_body)
-    
-    if leverage_result and leverage_result.get('code') == 0:
-        return True
-    return False
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
 
-def open_new_position(side, amount_btc):
-    """باز کردن پوزیشن جدید (BUY برای LONG، SELL برای SHORT)"""
-    
-    # 1. مطمئن شدن از تنظیم لوریج (10x Isolated)
-    set_leverage(LEVERAGE, position_type=1) 
-    
-    # 2. ارسال دستور مارکت
-    path_order = "/perpetual/submit_order"
-    body = {
-        'market': SYMBOL,
-        'side': side, 
-        'type': 'MARKET',
-        'amount': str(amount_btc) # مقدار در واحد BTC
-    }
-    
-    open_result = make_request('POST', path_order, body=body)
-    
-    if open_result:
-        print(f"🚀 موفق: پوزیشن {side} با حجم {amount_btc} BTC باز شد.")
-        return True
-    else:
-        print(f"❌ شکست: نتوانست پوزیشن {side} را باز کند.")
-        return False
+        rs_values = []
+        rsi_values = []
 
-# ====================================================================
-# 6. حلقه اصلی ربات
-# ====================================================================
-
-def run_trading_bot():
-    """تابع اصلی منطق ربات که هر 30 ثانیه اجرا می‌شود."""
-    
-    print(f"\n--- ParnyaBot V3.0 (CoinEx Perpetual) - Run Start: {time.ctime()} ---")
-    
-    # 1. دریافت و تحلیل داده‌ها
-    df = get_coinex_data()
-    if df is None or len(df) < 50:
-        print("🛑 داده‌های کافی برای تحلیل (K-Line) در دسترس نیست.")
-        return "ERROR: DATA"
-        
-    df = calculate_indicators(df)
-    
-    # 2. بررسی سیگنال
-    signal = get_final_signal(df)
-    current_price = df['close'].iloc[-1]
-    
-    print(f"📈 قیمت لحظه‌ای: {current_price:.2f} USDT")
-    print(f"📊 وضعیت RSI: {df['RSI'].iloc[-1]:.2f}, ST Direction: {df['ST_Direction'].iloc[-1]}")
-    print(f"🔥 سیگنال نهایی: {signal}")
-    
-    # 3. مدیریت پوزیشن‌های فعلی
-    positions = get_open_positions()
-    has_long = any(p['side'] == 'LONG' for p in positions)
-    has_short = any(p['side'] == 'SHORT' for p in positions)
-    
-    # 4. اجرای ترید
-    
-    if signal == "LONG":
-        if has_long:
-            print("➡️ سیگنال LONG است، پوزیشن LONG باز است. نگهداری.")
-        elif has_short:
-            print("🔄 سیگنال LONG است، ابتدا پوزیشن SHORT موجود بسته می‌شود.")
-            if close_all_positions(positions):
-                balance = get_current_balance("USDT")
-                amount_btc = calculate_amount(balance, current_price)
-                if amount_btc > 0:
-                    open_new_position('BUY', amount_btc)
+        if avg_loss == 0:
+            rsi_values.append(100)
         else:
-            print("🚀 سیگنال LONG است، پوزیشن جدید باز می‌شود.")
-            balance = get_current_balance("USDT")
-            amount_btc = calculate_amount(balance, current_price)
-            if amount_btc > 0:
-                open_new_position('BUY', amount_btc)
-                
-    elif signal == "SHORT":
-        if has_short:
-            print("➡️ سیگنال SHORT است، پوزیشن SHORT باز است. نگهداری.")
-        elif has_long:
-            print("🔄 سیگنال SHORT است، ابتدا پوزیشن LONG موجود بسته می‌شود.")
-            if close_all_positions(positions):
-                balance = get_current_balance("USDT")
-                amount_btc = calculate_amount(balance, current_price)
-                if amount_btc > 0:
-                    open_new_position('SELL', amount_btc)
-        else:
-            print("🚀 سیگنال SHORT است، پوزیشن جدید باز می‌شود.")
-            balance = get_current_balance("USDT")
-            amount_btc = calculate_amount(balance, current_price)
-            if amount_btc > 0:
-                open_new_position('SELL', amount_btc)
-                
-    elif signal == "HOLD":
-        print("⏸️ سیگنال HOLD است. هیچ اقدامی انجام نمی‌شود.")
+            rs = avg_gain / avg_loss
+            rsi_values.append(100 - (100 / (1 + rs)))
+
+        for i in range(period, len(gains)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+            
+            if avg_loss == 0:
+                rsi_values.append(100)
+            else:
+                rs = avg_gain / avg_loss
+                rsi_values.append(100 - (100 / (1 + rs)))
+        return rsi_values
+
+    def calculate_atr(self, candles, period=14):
+        if len(candles) < period:
+            return None
         
-    return "SUCCESS"
+        tr_values = []
+        for i in range(1, len(candles)):
+            high_low = candles[i]['high'] - candles[i]['low']
+            high_prev_close = abs(candles[i]['high'] - candles[i-1]['close'])
+            low_prev_close = abs(candles[i]['low'] - candles[i-1]['close'])
+            tr = max(high_low, high_prev_close, low_prev_close)
+            tr_values.append(tr)
+            
+        atr_values = []
+        atr = sum(tr_values[:period]) / period
+        atr_values.append(atr)
+        
+        for i in range(period, len(tr_values)):
+            atr = ((atr * (period - 1)) + tr_values[i]) / period
+            atr_values.append(atr)
+            
+        return atr_values
+
+    def calculate_supertrend(self, candles, atr_period=10, multiplier=3):
+        if len(candles) < atr_period:
+            return None
+        
+        atr_values = self.calculate_atr(candles, atr_period)
+        if not atr_values:
+            return None
+        
+        basic_upper_band = []
+        basic_lower_band = []
+        
+        for i in range(len(candles)):
+            if i >= atr_period -1: # ATR values start from atr_period - 1 index of candles
+                hl2 = (candles[i]['high'] + candles[i]['low']) / 2
+                basic_upper = hl2 + (multiplier * atr_values[i - (atr_period - 1)])
+                basic_lower = hl2 - (multiplier * atr_values[i - (atr_period - 1)])
+                basic_upper_band.append(basic_upper)
+                basic_lower_band.append(basic_lower)
+            else:
+                basic_upper_band.append(None)
+                basic_lower_band.append(None)
+        
+        final_upper_band = [None] * len(candles)
+        final_lower_band = [None] * len(candles)
+        
+        supertrend = [None] * len(candles)
+        supertrend_direction = [0] * len(candles) # 1 for uptrend, -1 for downtrend
+        
+# -*- coding: utf-8 -*-
+import os
+import time
+import hmac
+import hashlib
+import requests
+import json
+from datetime import datetime
+from threading import Thread, Event
+
+class CoinExAPI:
+    def __init__(self, api_key, secret_key):
+        self.api_key = api_key
+        self.secret_key = secret_key
+        self.base_url = "https://api.coinex.com/v1"
+
+    def _sign(self, params):
+        sorted_params = sorted(params.items(), key=lambda x: x[0])
+        param_string = "&".join([f"{k}={v}" for k, v in sorted_params])
+        sign_string = param_string + "&secret_key=" + self.secret_key
+        return hashlib.md5(sign_string.encode()).hexdigest()
+
+    def _request(self, method, path, params=None, headers=None):
+        if params is None:
+            params = {}
+        
+        timestamp = int(time.time() * 1000)
+        
+        if method in ["POST", "PUT", "DELETE"]:
+            # For POST, PUT, DELETE, params are in the body
+            auth_params = {
+                'access_id': self.api_key,
+                'tonce': timestamp,
+                **params
+            }
+            sign = self._sign(auth_params)
+            
+            req_headers = {
+                'User-Agent': 'CoinEx-API-Client/1.0.0',
+                'Content-Type': 'application/json',
+                'ACCESS-ID': self.api_key,
+                'ACCESS-SIGN': sign,
+                'ACCESS-TONCE': str(timestamp)
+            }
+            if headers:
+                req_headers.update(headers)
+            
+            response = requests.request(method, self.base_url + path, json=params, headers=req_headers)
+        else: # GET
+            # For GET, params are in the query string
+            auth_params = {
+                'access_id': self.api_key,
+                'tonce': timestamp,
+                **params
+            }
+            sign = self._sign(auth_params)
+            
+            req_headers = {
+                'User-Agent': 'CoinEx-API-Client/1.0.0',
+                'ACCESS-ID': self.api_key,
+                'ACCESS-SIGN': sign,
+                'ACCESS-TONCE': str(timestamp)
+            }
+            if headers:
+                req_headers.update(headers)
+                
+            response = requests.request(method, self.base_url + path, params=params, headers=req_headers)
+            
+        return response.json()
+
+    def get_market_depth(self, market, limit=5, merge="0"):
+        path = "/market/depth"
+        params = {
+            "market": market,
+            "limit": limit,
+            "merge": merge
+        }
+        return self._request("GET", path, params=params)
+
+    def get_kline(self, market, type="15min", limit=100):
+        path = "/market/kline"
+        params = {
+            "market": market,
+            "type": type,
+            "limit": limit
+        }
+        return self._request("GET", path, params=params)
+
+    def get_account_info(self):
+        path = "/balance_info"
+        return self._request("GET", path)
+
+    def get_position_info(self, market="BTCUSDT"):
+        path = "/contract/position"
+        params = {"market": market}
+        return self._request("GET", path, params=params)
+
+    def get_ticker(self, market="BTCUSDT"):
+        path = "/market/ticker"
+        params = {"market": market}
+        return self._request("GET", path, params=params)
+
+    def place_order(self, market, type, side, price, amount, leverage=10, client_id=""):
+        path = "/order/limit"
+        params = {
+            "access_id": self.api_key,
+            "market": market,
+            "type": type, # "limit" or "market" (for spot, for contract it's usually limit)
+            "side": side, # "buy" or "sell"
+            "price": str(price),
+            "amount": str(amount),
+            "source_id": client_id,
+            "leverage": leverage
+        }
+        return self._request("POST", path, params=params)
+
+    def cancel_order(self, market, order_id):
+        path = "/order/cancel"
+        params = {
+            "access_id": self.api_key,
+            "market": market,
+            "order_id": order_id
+        }
+        return self._request("POST", path, params=params)
     
-# ====================================================================
-# 7. پیکربندی Flask (برای اجرای در Render)
-# ====================================================================
+    def get_open_orders(self, market="BTCUSDT", offset=0, limit=100):
+        path = "/order/pending"
+        params = {
+            "market": market,
+            "offset": offset,
+            "limit": limit
+        }
+        return self._request("GET", path, params=params)
+
+class Bot:
+    def __init__(self, api_key, secret_key, market="BTCUSDT", leverage=10, timeframe="15min"):
+        self.coinex = CoinExAPI(api_key, secret_key)
+        self.market = market
+        self.leverage = leverage
+        self.timeframe = timeframe
+        self.stop_event = Event()
+        self.trade_thread = None
+        self.min_btc_amount = 0.0001 # CoinEx BTCUSDT minimum order amount
+
+    def get_candlestick_data(self):
+        klines_data = self.coinex.get_kline(market=self.market, type=self.timeframe, limit=200)
+        if klines_data and klines_data['code'] == 0:
+            candles = []
+            for kline in klines_data['data']:
+                candles.append({
+                    "timestamp": kline[0],
+                    "open": float(kline[1]),
+                    "close": float(kline[2]),
+                    "high": float(kline[3]),
+                    "low": float(kline[4]),
+                    "volume": float(kline[5])
+                })
+            return candles
+        return None
+
+    def calculate_ema(self, prices, period):
+        if not prices:
+            return []
+        ema_values = [sum(prices[:period]) / period]
+        multiplier = 2 / (period + 1)
+        for i in range(period, len(prices)):
+            ema = (prices[i] - ema_values[-1]) * multiplier + ema_values[-1]
+            ema_values.append(ema)
+        return ema_values
+
+    def calculate_rsi(self, prices, period=14):
+        if len(prices) < period:
+            return None
+
+        gains = []
+        losses = []
+        for i in range(1, len(prices)):
+            change = prices[i] - prices[i-1]
+            if change > 0:
+                gains.append(change)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(abs(change))
+
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+
+        rs_values = []
+        rsi_values = []
+
+        if avg_loss == 0:
+            rsi_values.append(100)
+        else:
+            rs = avg_gain / avg_loss
+            rsi_values.append(100 - (100 / (1 + rs)))
+
+        for i in range(period, len(gains)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+            
+            if avg_loss == 0:
+                rsi_values.append(100)
+            else:
+                rs = avg_gain / avg_loss
+                rsi_values.append(100 - (100 / (1 + rs)))
+        return rsi_values
+
+    def calculate_atr(self, candles, period=14):
+        if len(candles) < period:
+            return None
+        
+        tr_values = []
+        for i in range(1, len(candles)):
+            high_low = candles[i]['high'] - candles[i]['low']
+            high_prev_close = abs(candles[i]['high'] - candles[i-1]['close'])
+            low_prev_close = abs(candles[i]['low'] - candles[i-1]['close'])
+            tr = max(high_low, high_prev_close, low_prev_close)
+            tr_values.append(tr)
+            
+        atr_values = []
+        atr = sum(tr_values[:period]) / period
+        atr_values.append(atr)
+        
+        for i in range(period, len(tr_values)):
+            atr = ((atr * (period - 1)) + tr_values[i]) / period
+            atr_values.append(atr)
+            
+        return atr_values
+
+    def calculate_supertrend(self, candles, atr_period=10, multiplier=3):
+        if len(candles) < atr_period:
+            return None
+        
+        atr_values = self.calculate_atr(candles, atr_period)
+        if not atr_values:
+            return None
+        
+        basic_upper_band = []
+        basic_lower_band = []
+        
+        for i in range(len(candles)):
+            if i >= atr_period -1: # ATR values start from atr_period - 1 index of candles
+                hl2 = (candles[i]['high'] + candles[i]['low']) / 2
+                basic_upper = hl2 + (multiplier * atr_values[i - (atr_period - 1)])
+                basic_lower = hl2 - (multiplier * atr_values[i - (atr_period - 1)])
+                basic_upper_band.append(basic_upper)
+                basic_lower_band.append(basic_lower)
+            else:
+                basic_upper_band.append(None)
+                basic_lower_band.append(None)
+        
+        final_upper_band = [None] * len(candles)
+        final_lower_band = [None] * len(candles)
+        
+        supertrend = [None] * len(candles)
+        supertrend_direction = [0] * len(candles) # 1 for uptrend, -1 for downtrend
+        
+        for i in range(len(candles)):
+            if basic_upper_band[i] is None:
+                continue
+
+            # Calculate Final Upper Band
+            if i == 0 or final_upper_band[i-1] is None:
+                final_upper_band[i] = basic_upper_band[i]
+            elif basic_upper_band[i] < final_upper_band[i-1] or candles[i-1]['close'] > final_upper_band[i-1]:
+                final_upper_band[i] = basic_upper_band[i]
+            else:
+                final_upper_band[i] = final_upper_band[i-1]
+            
+            # Calculate Final Lower Band
+            if i == 0 or final_lower_band[i-1] is None:
+                final_lower_band[i] = basic_lower_band[i]
+            elif basic_lower_band[i] > final_lower_band[i-1] or candles[i-1]['close'] < final_lower_band[i-1]:
+                final_lower_band[i] = basic_lower_band[i]
+            else:
+                final_lower_band[i] = final_lower_band[i-1]
+
+            # Calculate Supertrend
+            if supertrend_direction[i-1] == 1 and candles[i]['close'] < final_lower_band[i]:
+                supertrend_direction[i] = -1
+            elif supertrend_direction[i-1] == -1 and candles[i]['close'] > final_upper_band[i]:
+                supertrend_direction[i] = 1
+            else:
+                supertrend_direction[i] = supertrend_direction[i-1]
+            
+            if supertrend_direction[i] == 1:
+                supertrend[i] = final_lower_band[i]
+            else:
+                supertrend[i] = final_upper_band[i]
+        
+        return supertrend, supertrend_direction
+
+
+    def analyze_strategy_c(self, candles):
+        closes = [c['close'] for c in candles]
+
+        # EMA
+        ema10 = self.calculate_ema(closes, 10)
+        ema20 = self.calculate_ema(closes, 20)
+        ema50 = self.calculate_ema(closes, 50)
+        
+        if len(ema10) < 1 or len(ema20) < 1 or len(ema50) < 1:
+            return None, "Not enough data for EMA"
+
+        latest_ema10 = ema10[-1]
+        latest_ema20 = ema20[-1]
+        latest_ema50 = ema50[-1]
+
+        # RSI
+        rsi_values = self.calculate_rsi(closes, 14)
+        if rsi_values is None:
+            return None, "Not enough data for RSI"
+        latest_rsi = rsi_values[-1]
+
+        # Supertrend
+        supertrend_line, supertrend_dir = self.calculate_supertrend(candles, atr_period=10, multiplier=3)
+        if supertrend_line is None or len(supertrend_line) < 1:
+            return None, "Not enough data for Supertrend"
+        latest_supertrend_line = supertrend_line[-1]
+        latest_supertrend_dir = supertrend_dir[-1]
+
+        latest_close = closes[-1]
+
+        # Buy/Long Signal
+        # EMA crossover: EMA10 > EMA20 > EMA50
+        # RSI: > 50 (indicating bullish momentum)
+        # Supertrend: Currently in uptrend (green)
+        if (latest_ema10 > latest_ema20 and latest_ema20 > latest_ema50 and
+            latest_rsi > 50 and latest_supertrend_dir == 1 and
+            latest_close > latest_supertrend_line):
+            return "BUY", "Strategy C: All bullish conditions met"
+
+        # Sell/Short Signal
+        # EMA crossover: EMA10 < EMA20 < EMA50
+        # RSI: < 50 (indicating bearish momentum)
+        # Supertrend: Currently in downtrend (red)
+        if (latest_ema10 < latest_ema20 and latest_ema20 < latest_ema50 and
+            latest_rsi < 50 and latest_supertrend_dir == -1 and
+            latest_close < latest_supertrend_line):
+            return "SELL", "Strategy C: All bearish conditions met"
+
+        return "HOLD", "No clear signal from Strategy C"
+
+    def get_available_balance(self, asset="USDT"):
+        account_info = self.coinex.get_account_info()
+        if account_info and account_info['code'] == 0:
+            for currency, balance_data in account_info['data']['balance'].items():
+                if currency == asset:
+                    return float(balance_data['available'])
+        return 0.0
+
+    def get_position_quantity(self, market="BTCUSDT"):
+        position_info = self.coinex.get_position_info(market)
+        if position_info and position_info['code'] == 0:
+            if 'data' in position_info and position_info['data']:
+                # The data structure might be a list of positions or a single position object
+                # Assuming 'data' is a list and we want the first one, or it's a dict.
+                if isinstance(position_info['data'], list) and position_info['data']:
+                    for pos in position_info['data']:
+                        if pos['market'] == market:
+                            return float(pos['amount']), pos['type'] # type: 'long' or 'short'
+                elif isinstance(position_info['data'], dict) and position_info['data'].get('market') == market:
+                     return float(position_info['data']['amount']), position_info['data']['type']
+        return 0.0, None
+
+    def calculate_order_amount(self, current_price, usdt_balance, is_long):
+        # Calculate max orderable amount considering leverage and minimum trade size
+        # Coinex minimum BTCUSDT order amount is 0.0001 BTC
+        
+        # Total value we can trade with leverage
+        trade_value_usdt = usdt_balance * self.leverage
+        
+        # Amount in BTC
+        amount_btc = trade_value_usdt / current_price
+        
+        # Ensure it meets minimum
+        if amount_btc < self.min_btc_amount:
+            print(f"Calculated amount {amount_btc:.8f} is less than minimum {self.min_btc_amount}, adjusting to minimum.")
+            amount_btc = self.min_btc_amount
+            
+            # Check if even minimum is affordable with current balance
+            cost_for_min_btc = (self.min_btc_amount * current_price) / self.leverage
+            if cost_for_min_btc > usdt_balance:
+                print(f"Not enough balance ({usdt_balance:.2f} USDT) to open minimum position ({self.min_btc_amount} BTC) at current price ({current_price:.2f}). Required: {cost_for_min_btc:.2f} USDT.")
+                return 0.0
+
+        return amount_btc
+
+    def trade_loop(self):
+        print("Bot started trading loop.")
+        while not self.stop_event.is_set():
+            try:
+                candles = self.get_candlestick_data()
+                if not candles:
+                    print("Failed to get candlestick data. Retrying in 60 seconds.")
+                    time.sleep(60)
+                    continue
+
+                signal, reason = self.analyze_strategy_c(candles)
+                current_price = candles[-1]['close'] # Use the latest close price for decisions
+
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Market: {self.market}, Signal: {signal}, Reason: {reason}, Current Price: {current_price:.2f}")
+
+                position_quantity, position_type = self.get_position_quantity(self.market)
+                open_orders = self.coinex.get_open_orders(self.market)
+                
+                # Cancel any pending orders before making new decisions
+                if open_orders and open_orders['code'] == 0 and open_orders['data']['data']:
+                    print(f"Found {len(open_orders['data']['data'])} open orders. Cancelling them.")
+                    for order in open_orders['data']['data']:
+                        self.coinex.cancel_order(self.market, order['id'])
+                    # Give some time for orders to be cancelled
+                    time.sleep(5)
+                    # Recheck position after cancellation
+                    position_quantity, position_type = self.get_position_quantity(self.market)
+
+
+                if signal == "BUY":
+                    if position_type == "short":
+                        print(f"Closing existing SHORT position ({position_quantity:.8f} {self.market.replace('USDT', '')}) before going LONG.")
+                        # Close short position by buying
+                        self.coinex.place_order(self.market, "limit", "buy", current_price, position_quantity, self.leverage)
+                        time.sleep(5) # Wait for order to fill
+                        position_quantity, position_type = self.get_position_quantity(self.market)
+                        if position_quantity > 0: # If position still exists, something went wrong
+                            print("Failed to fully close short position.")
+                            continue # Try again next cycle
+                        print("Short position closed.")
+
+                    if position_type != "long" or position_quantity == 0:
+                        usdt_balance = self.get_available_balance("USDT")
+                        amount_to_buy = self.calculate_order_amount(current_price, usdt_balance, True)
+                        
+                        if amount_to_buy > 0:
+                            print(f"Placing LONG order: {amount_to_buy:.8f} {self.market.replace('USDT', '')} at {current_price:.2f} USDT.")
+                            order = self.coinex.place_order(self.market, "limit", "buy", current_price, amount_to_buy, self.leverage)
+                            if order and order['code'] == 0:
+                                print(f"LONG order placed successfully: {order['data']['id']}")
+                            else:
+                                print(f"Failed to place LONG order: {order}")
+                        else:
+                            print("Cannot place LONG order: Not enough balance or amount too small.")
+                    else:
+                        print("Already in a LONG position. Holding.")
+
+                elif signal == "SELL":
+                    if position_type == "long":
+                        print(f"Closing existing LONG position ({position_quantity:.8f} {self.market.replace('USDT', '')}) before going SHORT.")
+                        # Close long position by selling
+                        self.coinex.place_order(self.market, "limit", "sell", current_price, position_quantity, self.leverage)
+                        time.sleep(5) # Wait for order to fill
+                        position_quantity, position_type = self.get_position_quantity(self.market)
+                        if position_quantity > 0: # If position still exists
+                            print("Failed to fully close long position.")
+                            continue # Try again next cycle
+                        print("Long position closed.")
+
+                    if position_type != "short" or position_quantity == 0:
+                        usdt_balance = self.get_available_balance("USDT")
+                        amount_to_sell = self.calculate_order_amount(current_price, usdt_balance, False) # Using same logic for amount
+                        
+                        if amount_to_sell > 0:
+                            print(f"Placing SHORT order: {amount_to_sell:.8f} {self.market.replace('USDT', '')} at {current_price:.2f} USDT.")
+                            order = self.coinex.place_order(self.market, "limit", "sell", current_price, amount_to_sell, self.leverage)
+                            if order and order['code'] == 0:
+                                print(f"SHORT order placed successfully: {order['data']['id']}")
+                            else:
+                                print(f"Failed to place SHORT order: {order}")
+                        else:
+                            print("Cannot place SHORT order: Not enough balance or amount too small.")
+                    else:
+                        print("Already in a SHORT position. Holding.")
+                else: # HOLD
+                    print("No strong signal, holding current position or staying out of market.")
+                    # If there's an open position, we'll just keep it based on HOLD signal
+                    # If there are open orders (e.g., from a failed close), they should have been cancelled already.
+
+                # Sleep until the next candlestick closes (15 minutes for 15min timeframe)
+                # This assumes we want to analyze data at the start of each new candle
+                # For 15min, 900 seconds. Add a buffer for API calls.
+                time.sleep(15 * 60) 
+
+            except Exception as e:
+                print(f"An error occurred in trade loop: {e}")
+                time.sleep(60) # Wait before retrying
+
+    def start_bot(self):
+        if self.trade_thread and self.trade_thread.is_alive():
+            print("Bot is already running.")
+            return "Bot is already running."
+        
+        self.stop_event.clear()
+        self.trade_thread = Thread(target=self.trade_loop)
+        self.trade_thread.start()
+        print("Bot started.")
+        return "Bot started."
+
+    def stop_bot(self):
+        if self.trade_thread and self.trade_thread.is_alive():
+            self.stop_event.set()
+            self.trade_thread.join()
+            print("Bot stopped.")
+            return "Bot stopped."
+        else:
+            print("Bot is not running.")
+            return "Bot is not running."
+
+# Flask App for web interface to control the bot
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
-# فلگ کنترل برای حلقهٔ ترید
-bot_running = False
 
-def bot_loop():
-    """حلقه‌ای که وظیفهٔ اجرای متناوب ربات را بر عهده دارد."""
-    global bot_running
-    
-    # چک اولیه امنیتی
-    if API_KEY == "YOUR_API_KEY_HERE" or SECRET_KEY == "YOUR_SECRET_KEY_HERE":
-        print("CRITICAL: API_KEY/SECRET_KEY placeholder detected. Bot loop cannot run.")
-        bot_running = False
-        return
+# Replace with your actual API Key and Secret
+API_KEY = os.getenv("COINEX_API_KEY")
+SECRET_KEY = os.getenv("COINEX_SECRET_KEY")
 
-    while bot_running:
-        try:
-            run_trading_bot()
-        except Exception as e:
-            print(f"CRITICAL ERROR in main bot loop: {e}")
-            
-        # صبر برای اجرای بعدی
-        time.sleep(TRADE_INTERVAL_SECONDS)
-        
-    print("Bot loop stopped successfully.")
+if not API_KEY or not SECRET_KEY:
+    print("WARNING: COINEX_API_KEY or COINEX_SECRET_KEY environment variables are not set.")
+    print("Please set them before deploying to Render. Bot functionality will be limited.")
+    # For local testing without environment variables, you can uncomment these and fill them:
+    # API_KEY = "YOUR_API_KEY"
+    # SECRET_KEY = "YOUR_SECRET_KEY"
 
-@app.route('/')
+# Initialize the bot globally
+trading_bot = None
+if API_KEY and SECRET_KEY:
+    trading_bot = Bot(API_KEY, SECRET_KEY, market="BTCUSDT", leverage=10, timeframe="15min")
+else:
+    print("Bot not initialized due to missing API keys.")
+
+
+@app.route("/")
 def home():
-    """روت اصلی برای چک کردن وضعیت سرویس"""
-    global bot_running
-    status = "RUNNING" if bot_running else "STOPPED"
-    return jsonify({
-        "status": status,
-        "message": f"Parnya Trading Bot status: {status}. Access /start_bot to begin trading.",
-        "config": f"Market: {SYMBOL} @ {TIMEFRAME}, Leverage: {LEVERAGE}x, Interval: {TRADE_INTERVAL_SECONDS}s"
-    })
+    return "CoinEx Trading Bot is running. Use /start_bot or /stop_bot."
 
-@app.route('/start_bot')
+@app.route("/status")
+def status():
+    if trading_bot:
+        if trading_bot.trade_thread and trading_bot.trade_thread.is_alive():
+            return jsonify({"status": "running", "message": "Trading bot is active."})
+        else:
+            return jsonify({"status": "stopped", "message": "Trading bot is currently stopped."})
+    else:
+        return jsonify({"status": "error", "message": "Trading bot not initialized (API keys missing?)."})
+
+
+@app.route("/start_bot", methods=["POST"])
 def start_bot_route():
-    """روت برای شروع حلقه ترید در پس‌زمینه"""
-    global bot_running
-    if not bot_running:
-        bot_running = True
-        # اجرای حلقه ربات در یک Thread جداگانه
-        thread = threading.Thread(target=bot_loop)
-        thread.daemon = True 
-        thread.start()
-        print("Bot started successfully in background thread.")
-        return jsonify({"status": "started", "message": "Parnya Bot has started its trading loop."})
-    else:
-        return jsonify({"status": "already_running", "message": "Parnya Bot is already running."})
+    if not trading_bot:
+        return jsonify({"status": "error", "message": "Cannot start bot, API keys are missing or bot not initialized."}), 400
+    
+    message = trading_bot.start_bot()
+    return jsonify({"status": "success", "message": message})
 
-@app.route('/stop_bot')
+@app.route("/stop_bot", methods=["POST"])
 def stop_bot_route():
-    """روت برای توقف حلقه ترید"""
-    global bot_running
-    if bot_running:
-        bot_running = False
-        print("Bot requested to stop.")
-        return jsonify({"status": "stopping", "message": "Parnya Bot will stop after the current 30s cycle finishes."})
+    if not trading_bot:
+        return jsonify({"status": "error", "message": "Cannot stop bot, API keys are missing or bot not initialized."}), 400
+
+    message = trading_bot.stop_bot()
+    return jsonify({"status": "success", "message": message})
+
+if __name__ == "__main__":
+    # This block is mainly for local development.
+    # On Render, Gunicorn will typically handle running the app.
+    if API_KEY and SECRET_KEY:
+        print("Bot initialized with API keys. Starting Flask app...")
+        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
     else:
-        return jsonify({"status": "already_stopped", "message": "Parnya Bot is already stopped."})
-# ====================================================================
+        print("Bot not initialized. Please set COINEX_API_KEY and COINEX_SECRET_KEY environment variables.")
+        print("Running Flask app without bot functionality for status checks only.")
+        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+        for i in range(len(candles)):
+            if basic_upper_band[i] is None:
+                continue
 
-def get_final_signal(df):
-    """ترکیب سیگنال‌های EMA Cross، Supertrend و فیلتر RSI"""
-    latest = df.iloc[-1]
-    
-    # 1. سیگنال EMA
-    ema_signal = 0
-    if latest['EMA_Short'] > latest['EMA_Long']:
-        ema_signal = 1 # Long
-    elif latest['EMA_Short'] < latest['EMA_Long']:
-        ema_signal = -1 # Short
-        
-    # 2. سیگنال Supertrend
-    st_signal = latest['ST_Direction']
-    
-    # 3. ترکیب و فیلتر RSI
-    
-    final_signal = "HOLD"
-    
-    if ema_signal == 1 and st_signal == 1:
-        # کاندید LONG: اگر RSI بیش از حد بالا نباشد (Overbought)
-        if latest['RSI'] <= RSI_OVERBOUGHT:
-            final_signal = "LONG"
-        else:
-            # فیلتر RSI فعال شد
-            final_signal = "HOLD" 
-            
-    elif ema_signal == -1 and st_signal == -1:
-        # کاندید SHORT: اگر RSI بیش از حد پایین نباشد (Oversold)
-        if latest['RSI'] >= RSI_OVERSOLD:
-            final_signal = "SHORT"
-        else:
-            # فیلتر RSI فعال شد
-            final_signal = "HOLD"
-            
-    # اگر سیگنال‌های اصلی ضد و نقیض باشند، HOLD می‌کنیم
-    
-    return final_signal
-
-# ====================================================================
-# 5. توابع اجرایی ترید
-# ====================================================================
-
-def get_coinex_data():
-    """دریافت داده‌های کندل (K-Line) از CoinEx"""
-    path = f"/market/kline"
-    params = {
-        'market': SYMBOL,
-        'time_type': TIMEFRAME,
-        'limit': 100 
-    }
-    
-    result = make_request('GET', path, params=params)
-    
-    if result and result.get('code') == 0:
-        data = result['data']['kline']
-        df = pd.DataFrame(data, columns=['ts', 'open', 'close', 'high', 'low', 'amount', 'volume'])
-        # اطمینان از نوع داده عددی
-        for col in ['open', 'close', 'high', 'low', 'amount', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-        df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
-        df = df.set_index('datetime')
-        return df
-    return None
-
-def get_current_balance(ccy="USDT"):
-    """دریافت موجودی قابل استفاده (Available) در حساب Perpetual"""
-    path = "/asset/margin/balance"
-    # برای معاملات Perpetual (فیوچرز) باید موجودی حساب Perpetual را چک کنیم.
-    # در CoinEx V2، این endpoint موجودی‌ها را برمی‌گرداند.
-    
-    result = make_request('GET', path, params={'ccy': ccy})
-    
-    if result and result.get('code') == 0:
-        for asset in result['data']:
-            if asset['ccy'] == ccy:
-                # استفاده از 'available'
-                return float(asset['available'])
-    return 0.0
-
-def get_open_positions():
-    """دریافت لیست پوزیشن‌های باز برای بازار مشخص"""
-    path = "/perpetual/position"
-    params = {'market': SYMBOL}
-    result = make_request('GET', path, params=params)
-    
-    if result and result.get('code') == 0:
-        # فیلتر کردن پوزیشن‌هایی که اندازه آن‌ها واقعاً > 0 است
-        positions = [p for p in result['data'] if float(p['position_size']) > 0]
-        return positions
-    return []
-
-def calculate_amount(balance_usdt, current_price):
-    """محاسبه حجم پوزیشن در واحد BTC بر اساس موجودی کل و لوریج"""
-    
-    if current_price <= 0:
-        return 0.0
-        
-    # محاسبه کل ارزش دلاری که وارد معامله می‌شود
-    total_usdt_value = balance_usdt * LEVERAGE
-    # تبدیل به حجم BTC
-    amount_btc = total_usdt_value / current_price
-    
-CoinEx برای BTCUSDT حداقل اندازه 0.0001 دارد.
-    min_btc_amount = 0.0001
-    
-    if amount_btc < min_btc_amount:
-        print(f"⚠️ موجودی کافی برای حداقل حجم معامله {min_btc_amount} BTC وجود ندارد. (Calculated: {amount_btc:.4f})")
-        return 0.0
-        
-    # بازگرداندن با دقت بالا
-    return float(f"{amount_btc:.4f}") 
-
-def close_all_positions(positions):
-    """بستن تمام پوزیشن‌های باز برای SYMBOL مشخص"""
-    
-    # اطمینان از تنظیم لوریج و Isolated قبل از ترید (برای بار اول)
-    set_leverage(LEVERAGE, position_type=1) 
-    
-    closed_count = 0
-    for pos in positions:
-        if float(pos['position_size']) > 0:
-            path = "/perpetual/close_position"
-            body = {
-                'market': SYMBOL,
-                'position_id': pos['position_id'], 
-                'close_type': 'MARKET' # بستن فوری در قیمت بازار
-            }
-            
-            close_result = make_request('POST', path, body=body)
-            if close_result:
-                print(f"✅ پوزیشن {pos['side']} با شناسه {pos['position_id']} بسته شد.")
-                closed_count += 1
+            # Calculate Final Upper Band
+            if i == 0 or final_upper_band[i-1] is None:
+                final_upper_band[i] = basic_upper_band[i]
+            elif basic_upper_band[i] < final_upper_band[i-1] or candles[i-1]['close'] > final_upper_band[i-1]:
+                final_upper_band[i] = basic_upper_band[i]
             else:
-                print(f"❌ خطای بستن پوزیشن {pos['position_id']}.")
-                # بهتر است ادامه دهیم تا بقیه هم بسته شوند
-                
-    return closed_count == len(positions)
+                final_upper_band[i] = final_upper_band[i-1]
+            
+            # Calculate Final Lower Band
+            if i == 0 or final_lower_band[i-1] is None:
+                final_lower_band[i] = basic_lower_band[i]
+            elif basic_lower_band[i] > final_lower_band[i-1] or candles[i-1]['close'] < final_lower_band[i-1]:
+                final_lower_band[i] = basic_lower_band[i]
+            else:
+                final_lower_band[i] = final_lower_band[i-1]
 
-def set_leverage(leverage, position_type=1):
-    """تنظیم لوریج و نوع پوزیشن (1: Isolated)"""
-    path_leverage = "/perpetual/position/adjust_leverage"
-    leverage_body = {
-        'market': SYMBOL,
-        'leverage': leverage,
-        'position_type': position_type 
-    }
-    leverage_result = make_request('POST', path_leverage, body=leverage_body)
-    
-    if leverage_result and leverage_result.get('code') == 0:
-        return True
-    return False
-
-def open_new_position(side, amount_btc):
-    """باز کردن پوزیشن جدید (BUY برای LONG، SELL برای SHORT)"""
-    
-    # 1. مطمئن شدن از تنظیم لوریج (10x Isolated)
-    set_leverage(LEVERAGE, position_type=1) 
-    
-    # 2. ارسال دستور مارکت
-    path_order = "/perpetual/submit_order"
-    body = {
-        'market': SYMBOL,
-        'side': side, 
-        'type': 'MARKET',
-        'amount': str(amount_btc) # مقدار در واحد BTC
-    }
-    
-    open_result = make_request('POST', path_order, body=body)
-    
-    if open_result:
-        print(f"🚀 موفق: پوزیشن {side} با حجم {amount_btc} BTC باز شد.")
-        return True
-    else:
-        print(f"❌ شکست: نتوانست پوزیشن {side} را باز کند.")
-        return False
-
-# ====================================================================
-# 6. حلقه اصلی ربات
-# ====================================================================
-
-def run_trading_bot():
-    """تابع اصلی منطق ربات که هر 30 ثانیه اجرا می‌شود."""
-    
-    print(f"\n--- ParnyaBot V3.0 (CoinEx Perpetual) - Run Start: {time.ctime()} ---")
-    
-    # 1. دریافت و تحلیل داده‌ها
-    df = get_coinex_data()
-    if df is None or len(df) < 50:
-        print("🛑 داده‌های کافی برای تحلیل (K-Line) در دسترس نیست.")
-        return "ERROR: DATA"
+            # Calculate Supertrend
+            if supertrend_direction[i-1] == 1 and candles[i]['close'] < final_lower_band[i]:
+                supertrend_direction[i] = -1
+            elif supertrend_direction[i-1] == -1 and candles[i]['close'] > final_upper_band[i]:
+                supertrend_direction[i] = 1
+            else:
+                supertrend_direction[i] = supertrend_direction[i-1]
+            
+            if supertrend_direction[i] == 1:
+                supertrend[i] = final_lower_band[i]
+            else:
+                supertrend[i] = final_upper_band[i]
         
-    df = calculate_indicators(df)
-    
-    # 2. بررسی سیگنال
-    signal = get_final_signal(df)
-    current_price = df['close'].iloc[-1]
-    
-    print(f"📈 قیمت لحظه‌ای: {current_price:.2f} USDT")
-    print(f"📊 وضعیت RSI: {df['RSI'].iloc[-1]:.2f}, ST Direction: {df['ST_Direction'].iloc[-1]}")
-    print(f"🔥 سیگنال نهایی: {signal}")
-    
-    # 3. مدیریت پوزیشن‌های فعلی
-    positions = get_open_positions()
-    has_long = any(p['side'] == 'LONG' for p in positions)
-    has_short = any(p['side'] == 'SHORT' for p in positions)
-    
-    # 4. اجرای ترید
+        return supertrend, supertrend_direction
+
+
+    def analyze_strategy_c(self, candles):
+        closes = [c['close'] for c in candles]
+
+        # EMA
+        ema10 = self.calculate_ema(closes, 10)
+        ema20 = self.calculate_ema(closes, 20)
+        ema50 = self.calculate_ema(closes, 50)
+        
+        if len(ema10) < 1 or len(ema20) < 1 or len(ema50) < 1:
+            return None, "Not enough data for EMA"
+
+        latest_ema10 = ema10[-1]
+        latest_ema20 = ema20[-1]
+        latest_ema50 = ema50[-1]
+
+        # RSI
+        rsi_values = self.calculate_rsi(closes, 14)
+        if rsi_values is None:
+            return None, "Not enough data for RSI"
+        latest_rsi = rsi_values[-1]
+
+        # Supertrend
+        supertrend_line, supertrend_dir = self.calculate_supertrend(candles, atr_period=10, multiplier=3)
+        if supertrend_line is None or len(supertrend_line) < 1:
+            return None, "Not enough data for Supertrend"
+        latest_supertrend_line = supertrend_line[-1]
+        latest_supertrend_dir = supertrend_dir[-1]
+
+        latest_close = closes[-1]
+
+        # Buy/Long Signal
+        # EMA crossover: EMA10 > EMA20 > EMA50
+        # RSI: > 50 (indicating bullish momentum)
+        # Supertrend: Currently in uptrend (green)
+        if (latest_ema10 > latest_ema20 and latest_ema20 > latest_ema50 and
+            latest_rsi > 50 and latest_supertrend_dir == 1 and
+            latest_close > latest_supertrend_line):
+            return "BUY", "Strategy C: All bullish conditions met"
+
+        # Sell/Short Signal
+        # EMA crossover: EMA10 < EMA20 < EMA50
+        # RSI: < 50 (indicating bearish momentum)
+        # Supertrend: Currently in downtrend (red)
+        if (latest_ema10 < latest_ema20 and latest_ema20 < latest_ema50 and
+            latest_rsi < 50 and latest_supertrend_dir == -1 and
+            latest_close < latest_supertrend_line):
+            return "SELL", "Strategy C: All bearish conditions met"
+
+        return "HOLD", "No clear signal from Strategy C"
+
+    def get_available_balance(self, asset="USDT"):
+        account_info = self.coinex.get_account_info()
+        if account_info and account_info['code'] == 0:
+            for currency, balance_data in account_info['data']['balance'].items():
+                if currency == asset:
+                    return float(balance_data['available'])
+        return 0.0
+
+    def get_position_quantity(self, market="BTCUSDT"):
+        position_info = self.coinex.get_position_info(market)
+        if position_info and position_info['code'] == 0:
+            if 'data' in position_info and position_info['data']:
+                # The data structure might be a list of positions or a single position object
+                # Assuming 'data' is a list and we want the first one, or it's a dict.
+                if isinstance(position_info['data'], list) and position_info['data']:
+                    for pos in position_info['data']:
+                        if pos['market'] == market:
+                            return float(pos['amount']), pos['type'] # type: 'long' or 'short'
+                elif isinstance(position_info['data'], dict) and position_info['data'].get('market') == market:
+               return float(position_info['data']['amount']), position_info['data']['type']
+        return 0.0, None
+
+    def calculate_order_amount(self, current_price, usdt_balance, is_long):
+        # Calculate max orderable amount considering leverage and minimum trade size
+        # Coinex minimum BTCUSDT order amount is 0.0001 BTC
+        
+        # Total value we can trade with leverage
+        trade_value_usdt = usdt_balance * self.leverage
+        
+        # Amount in BTC
+        amount_btc = trade_value_usdt / current_price
+        
+        # Ensure it meets minimum
+        if amount_btc < self.min_btc_amount:
+            print(f"Calculated amount {amount_btc:.8f} is less than minimum {self.min_btc_amount}, adjusting to minimum.")
+            amount_btc = self.min_btc_amount
+            
+            # Check if even minimum is affordable with current balance
+            cost_for_min_btc = (self.min_btc_amount * current_price) / self.leverage
+            if cost_for_min_btc > usdt_balance:
+                print(f"Not enough balance ({usdt_balance:.2f} USDT) to open minimum position ({self.min_btc_amount} BTC) at current price ({current_price:.2f}). Required: {cost_for_min_btc:.2f} USDT.")
+                return 0.0
+
+        return amount_btc
+
+    def trade_loop(self):
+        print("Bot started trading loop.")
+        while not self.stop_event.is_set():
+            try:
+                candles = self.get_candlestick_data()
+                if not candles:
+                    print("Failed to get candlestick data. Retrying in 60 seconds.")
+                    time.sleep(60)
+                    continue
+
+                signal, reason = self.analyze_strategy_c(candles)
+                current_price = candles[-1]['close'] # Use the latest close price for decisions
+
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Market: {self.market}, Signal: {signal}, Reason: {reason}, Current Price: {current_price:.2f}")
+
+                position_quantity, position_type = self.get_position_quantity(self.market)
+                open_orders = self.coinex.get_open_orders(self.market)
+                
+                # Cancel any pending orders before making new decisions
+                if open_orders and open_orders['code'] == 0 and open_orders['data']['data']:
+                    print(f"Found {len(open_orders['data']['data'])} open orders. Cancelling them.")
+                    for order in open_orders['data']['data']:
+                        self.coinex.cancel_order(self.market, order['id'])
+                    # Give some time for orders to be cancelled
+                    time.sleep(5)
+                    # Recheck position after cancellation
+                    position_quantity, position_type = self.get_position_quantity(self.market)
+
+
+                if signal == "BUY":
+                    if position_type == "short":
+                        print(f"Closing existing SHORT position ({position_quantity:.8f} {self.market.replace('USDT', '')}) before going LONG.")
+                        # Close short position by buying
+                        self.coinex.place_order(self.market, "limit", "buy", current_price, position_quantity, self.leverage)
+                        time.sleep(5) # Wait for order to fill
+                        position_quantity, position_type = self.get_position_quantity(self.market)
+                        if position_quantity > 0: # If position still exists, something went wrong
+                            print("Failed to fully close short position.")
+                            continue # Try again next cycle
+                        print("Short position closed.")
+
+                    if position_type != "long" or position_quantity == 0:
+                        usdt_balance = self.get_available_balance("USDT")
+                        amount_to_buy = self.calculate_order_amount(current_price, usdt_balance, True)
+                        
+                        if amount_to_buy > 0:
+                            print(f"Placing LONG order: {amount_to_buy:.8f} {self.market.replace('USDT', '')} at {current_price:.2f} USDT.")
+                            order = self.coinex.place_order(self.market, "limit", "buy", current_price, amount_to_buy, self.leverage)
+                            if order and order['code'] == 0:
+                                print(f"LONG order placed successfully: {order['data']['id']}")
+                            else:
+                                print(f"Failed to place LONG order: {order}")
+                        else:
+                            print("Cannot place LONG order: Not enough balance or amount too small.")
+                    else:
+                        print("Already in a LONG position. Holding.")
+
+                elif signal == "SELL":
+                    if position_type == "long":
+                        print(f"Closing existing LONG position ({position_quantity:.8f} {self.market.replace('USDT', '')}) before going SHORT.")
+                        # Close long position by selling
+                        self.coinex.place_order(self.market, "limit", "sell", current_price, position_quantity, self.leverage)
+                        time.sleep(5) # Wait for order to fill
+                        position_quantity, position_type = self.get_position_quantity(self.market)
+                        if position_quantity > 0: # If position still exists
+                            print("Failed to fully close long position.")
+                            continue # Try again next cycle
+                        print("Long position closed.")
+
+                    if position_type != "short" or position_quantity == 0:
+                        usdt_balance = self.get_available_balance("USDT")
+                        amount_to_sell = self.calculate_order_amount(current_price, usdt_balance, False) # Using same logic for amount
+                        
+                        if amount_to_sell > 0:
+                            print(f"Placing SHORT order: {amount_to_sell:.8f} {self.market.replace('USDT', '')} at {current_price:.2f} USDT.")
+                            order = self.coinex.place_order(self.market, "limit", "sell", current_price, amount_to_sell, self.leverage)
+                            if order and order['code'] == 0:
+                                print(f"SHORT order placed successfully: {order['data']['id']}")
+                            else:
