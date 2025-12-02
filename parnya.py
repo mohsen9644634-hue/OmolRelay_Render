@@ -12,8 +12,8 @@ app = Flask(__name__)
 #   COINEX API CONFIG
 # ============================
 
-API_KEY = "YOUR_API_KEY"          # اینجا API KEY خودت
-SECRET_KEY = "YOUR_SECRET_KEY"    # اینجا SECRET KEY خودت
+API_KEY = "9702A8DB3E074A45996BAC0E8D85F748"
+SECRET_KEY = "4029D375ED5D17344BB175DF9FB0B36EBC497F5BA389C4C1"
 
 BASE_URL = "https://api.coinex.com/v1"
 
