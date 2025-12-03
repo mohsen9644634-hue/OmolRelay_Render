@@ -3,12 +3,12 @@ services:
     name: omolrelay
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn parnya:app --bind 0.0.0.0:$PORT
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn parnya:app --bind 0.0.0.0:$PORT"
 
   - type: worker
     name: keepalive
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python ping.py
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python ping.py"
