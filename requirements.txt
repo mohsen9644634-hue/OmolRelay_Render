@@ -1,5 +1,4 @@
-    Flask
-    requests
-    pandas
-    numpy
-    gunicorn
+flask
+requests
+gunicorn
+numpy
