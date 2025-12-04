@@ -1,79 +1,47 @@
+import os
 import time
+import hmac
 import hashlib
 import requests
-import os
 import numpy as np
 from flask import Flask, jsonify
 
-# ----------------------------------------------------
-# CONFIG
-# ----------------------------------------------------
-API_KEY = os.getenv("API_KEY")
-SECRET_KEY = os.getenv("SECRET_KEY")
-
-BASE_URL = "https://api.coinex.com/perpetual/v1"
-SYMBOL = "BTCUSDT"
-LEVERAGE = 10
-TIMEFRAME = "15m"
-
-RSI_PERIOD = 14
-MA_PERIOD = 50
-ATR_PERIOD = 14
-
 app = Flask(__name__)
 
+API_KEY = os.getenv("API_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
+BASE_URL = "https://api.coinex.com/perpetual/v1/"
+SYMBOL = "BTCUSDT"
 
 # ----------------------------------------------------
-# SIGN FUNCTION
+# SIGNATURE
 # ----------------------------------------------------
 def sign(params):
-    query = "&".join([f"{k}={params[k]}" for k in sorted(params)])
-    to_sign = query + SECRET_KEY
-    return hashlib.md5(to_sign.encode()).hexdigest()
-
+    sorted_params = "&".join([f"{k}={params[k]}" for k in sorted(params)])
+    to_sign = sorted_params + f"&secret_key={SECRET_KEY}"
+    return hashlib.md5(to_sign.encode()).hexdigest().upper()
 
 # ----------------------------------------------------
-# BASIC GET REQUEST
+# BASIC GET
 # ----------------------------------------------------
-def ce_request(url, params=None):
+def ce_get(url, params=None):
     if params is None:
         params = {}
-
     params["access_id"] = API_KEY
     params["tonce"] = int(time.time() * 1000)
     params["sign"] = sign(params)
-
     r = requests.get(BASE_URL + url, params=params)
     return r.json()
 
-
 # ----------------------------------------------------
-# BASIC POST REQUEST
+# BASIC POST
 # ----------------------------------------------------
-def ce_post(url, params=None):
-    if params is None:
-        params = {}
-
+def ce_post(url, params):
     params["access_id"] = API_KEY
     params["tonce"] = int(time.time() * 1000)
     params["sign"] = sign(params)
-
     r = requests.post(BASE_URL + url, data=params)
     return r.json()
-
-
-# ----------------------------------------------------
-# GET KLINES
-# ----------------------------------------------------
-def get_klines():
-    r = ce_request("/market/kline", {
-        "market": SYMBOL,
-        "limit": 200,
-        "interval": TIMEFRAME
-    })
-    closes = [float(c[4]) for c in r["data"]]
-    return closes
-
 
 # ----------------------------------------------------
 # INDICATORS
@@ -85,132 +53,113 @@ def calc_rsi(data, period=14):
 
     avg_up = np.mean(up[-period:])
     avg_down = np.mean(down[-period:])
-
     rs = avg_up / (avg_down + 1e-9)
     return 100 - (100 / (1 + rs))
-
 
 def calc_ma(data, period=50):
     return np.mean(data[-period:])
 
-
-def calc_atr(data, period=14):
-    tr = []
-    for i in range(1, period + 1):
-        tr.append(abs(data[-i] - data[-i - 1]))
-    return np.mean(tr)
-
+def calc_atr(high, low, close, period=14):
+    tr = np.maximum(high[1:] - low[1:], 
+                    np.maximum(abs(high[1:] - close[:-1]),
+                               abs(low[1:] - close[:-1])))
+    return np.mean(tr[-period:])
 
 # ----------------------------------------------------
-# ACCOUNT
+# KLINE DATA
 # ----------------------------------------------------
-def get_balance():
-    r = ce_request("/account/balance")
-    return float(r["data"]["USDT"]["available"])
-
-
-def get_position():
-    r = ce_request("/position/list", {"market": SYMBOL})
-    if len(r["data"]) == 0:
-        return None
-    return r["data"][0]
-
-
-# ----------------------------------------------------
-# PLACE ORDER (MARKET)
-# ----------------------------------------------------
-def place_order(side, size):
-    params = {
+def fetch_kline():
+    r = ce_get("market/kline", {
         "market": SYMBOL,
-        "side": side,  # buy / sell / close
-        "amount": size,
-        "type": 1,      # market order
-        "leverage": LEVERAGE,
-    }
-    return ce_post("/order/put", params)
+        "type": "1min",
+        "limit": 200
+    })
+    if r["code"] != 0:
+        return None
+    return r["data"]
 
+# ----------------------------------------------------
+# POSITION SIZE (FULL EQUITY)
+# ----------------------------------------------------
+def get_equity():
+    r = ce_get("account", {})
+    if r["code"] != 0:
+        return None
+    return float(r["data"]["USDT"]["available"])
 
 # ----------------------------------------------------
 # STRATEGY
 # ----------------------------------------------------
-def run_strategy():
-    closes = get_klines()
-    last = closes[-1]
+def strategy():
+    data = fetch_kline()
+    if data is None:
+        return {"error": "Failed to fetch kline"}
 
-    rsi = calc_rsi(closes, RSI_PERIOD)
-    ma50 = calc_ma(closes, MA_PERIOD)
-    atr = calc_atr(closes, ATR_PERIOD)
+    close = np.array([float(x["close"]) for x in data])
+    high = np.array([float(x["high"]) for x in data])
+    low = np.array([float(x["low"]) for x in data])
 
-    position = get_position()
-    balance = get_balance()
+    rsi = calc_rsi(close)
+    ma50 = calc_ma(close)
+    atr = calc_atr(high, low, close)
 
-    # سایز پوزیشن = کل موجودی × لوریج / قیمت
-    size = (balance * LEVERAGE) / last
+    decision = "HOLD"
 
-    # ---------------------------
-    # EXIT (اگر پوزیشن باز است)
-    # ---------------------------
-    if position:
-        entry = float(position["entry_price"])
-        side = position["side"]  # 1 = LONG / 2 = SHORT
+    if rsi < 30 and close[-1] > ma50:
+        decision = "LONG_SIGNAL"
+    elif rsi > 70 and close[-1] < ma50:
+        decision = "SHORT_SIGNAL"
 
-        if side == 1:
-            tp = entry + (atr * 2)
-            sl = entry - atr
-        else:
-            tp = entry - (atr * 2)
-            sl = entry + atr
+    return {
+        "rsi": float(rsi),
+        "ma50": float(ma50),
+        "atr": float(atr),
+        "decision": decision,
+        "last_price": float(close[-1])
+    }
 
-        # خروج بر اساس TP/SL
-        if (side == 1 and (last >= tp or last <= sl)) or \
-           (side == 2 and (last <= tp or last >= sl)):
-            place_order("close", abs(float(position["amount"])))
-            return "Exited position (TP/SL hit)"
-
-        # خروج خنثی RSI
-        if 45 < rsi < 55:
-            place_order("close", abs(float(position["amount"])))
-            return "Exited neutral RSI"
-
-        return "Holding position"
-
-    # ---------------------------
-    # ENTRY LONG
-    # ---------------------------
-    if rsi < 30 and last > ma50:
-        place_order("buy", size)
-        return "Opened LONG"
-
-    # ---------------------------
-    # ENTRY SHORT
-    # ---------------------------
-    if rsi > 70 and last < ma50:
-        place_order("sell", size)
-        return "Opened SHORT"
-
-    return "No signal"
-
+# ----------------------------------------------------
+# EXECUTE ORDER (LOG ONLY – SAFE)
+# ----------------------------------------------------
+def execute_order(side, size):
+    return {
+        "status": "LOG_ONLY",
+        "message": f"READY TO EXECUTE {side} MARKET ORDER (size={size}).",
+        "note": "To enable real trading, replace this function with ce_post() call."
+    }
 
 # ----------------------------------------------------
 # ROUTES
 # ----------------------------------------------------
 @app.route("/")
 def home():
-    return "سلام پویا! ربات Render با موفقیت اجرا شد."
+    return "Bot is running successfully on Render."
 
-@app.route("/status")
-def status():
-    return jsonify({"running": True, "symbol": SYMBOL})
+@app.route("/strategy")
+def strategy_route():
+    return jsonify(strategy())
 
 @app.route("/trade")
-def trade():
-    result = run_strategy()
-    return jsonify({"result": result})
+def trade_route():
+    st = strategy()
+    if "error" in st:
+        return jsonify(st)
 
+    equity = get_equity()
+    if equity is None:
+        return {"error": "Could not fetch equity"}
+
+    size = equity * 15  # 15x leverage size calculation
+
+    if st["decision"] == "LONG_SIGNAL":
+        return jsonify(execute_order("LONG", size))
+    elif st["decision"] == "SHORT_SIGNAL":
+        return jsonify(execute_order("SHORT", size))
+    else:
+        return {"status": "NO_ACTION", "decision": st["decision"]}
 
 # ----------------------------------------------------
 # MAIN
 # ----------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
-
