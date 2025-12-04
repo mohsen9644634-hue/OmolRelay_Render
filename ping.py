@@ -1,13 +1,11 @@
 import time
 import requests
 
-URL = "https://omolrelay-render.onrender.com/status"
+URL = "https://your-render-service.onrender.com/"
 
 while True:
     try:
-        r = requests.get(URL, timeout=10)
-        print("PING ->", r.status_code)
-    except Exception as e:
-        print("Ping Error:", e)
-
-    time.sleep(300)
+        requests.get(URL)
+    except:
+        pass
+    time.sleep(60)
