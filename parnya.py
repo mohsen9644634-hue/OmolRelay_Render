@@ -5,127 +5,132 @@ import pandas as pd
 
 app = Flask(__name__)
 
-# ============================================
-# Telegram (no tokens in code)
-# ============================================
+# =============================
+#  TELEGRAM  (SECURE)
+# =============================
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7156028278")
 
-def send_telegram_message(text):
+def send_telegram(text):
     if not BOT_TOKEN or not CHAT_ID:
-        return {"sent": False, "error": "Missing BOT_TOKEN or CHAT_ID"}
+        return {"sent": False, "error": "TOKEN/CHATID missing"}
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": text}
     try:
-        r = requests.post(url, data=data)
+        r = requests.post(url, json={"chat_id": CHAT_ID, "text": text})
         return r.json()
-    except:
-        return {"sent": False}
+    except Exception as e:
+        return {"sent": False, "error": str(e)}
 
-# ============================================
-# CoinEx Settings (secure)
-# ============================================
-BASE_URL = "https://api.coinex.com/v1"
-API_KEY = os.getenv("COINEX_KEY", "")
+# =============================
+#  COINEX CONFIG
+# =============================
+BASE = "https://api.coinex.com/v1"
+KEY = os.getenv("COINEX_KEY", "")
 SECRET = os.getenv("COINEX_SECRET", "").encode()
 SYMBOL = "BTCUSDT"
 
-def sign(params):
-    items = sorted(params.items())
-    qs = "&".join([f"{k}={v}" for k, v in items])
-    return hmac.new(SECRET, qs.encode(), hashlib.sha256).hexdigest()
+def sign(p):
+    s = "&".join([f"{k}={v}" for k, v in sorted(p.items())])
+    return hmac.new(SECRET, s.encode(), hashlib.sha256).hexdigest()
 
-def ce_request(url, params=None):
-    if params is None:
-        params = {}
-    params["access_id"] = API_KEY
-    params["tonce"] = int(time.time() * 1000)
+def ce(path, params=None):
+    if params is None: params = {}
+    params["access_id"] = KEY
+    params["tonce"] = int(time.time()*1000)
     params["sign"] = sign(params)
-    r = requests.get(BASE_URL + url, params=params)
-    return r.json()
+    try:
+        r = requests.get(BASE + path, params=params)
+        return r.json()
+    except:
+        return {"code": 500, "data": []}
 
-# ============================================
-# Indicators: MACD, RSI, ATR
-# ============================================
-def calc_rsi(prices, period=14):
-    diff = np.diff(prices)
+# =============================
+#  INDICATORS
+# =============================
+def calc_rsi(closes, period=14):
+    closes = np.array(closes, float)
+    diff = np.diff(closes)
     gain = np.where(diff > 0, diff, 0)
     loss = np.where(diff < 0, -diff, 0)
-    avg_gain = np.mean(gain[-period:])
-    avg_loss = np.mean(loss[-period:])
-    rs = avg_gain / avg_loss if avg_loss != 0 else 0
-    return 100 - (100 / (1 + rs))
+    ag = np.mean(gain[-period:])
+    al = np.mean(loss[-period:])
+    if al == 0:
+        return 100
+    return 100 - (100 / (1 + (ag/al)))
 
-def calc_macd(prices):
-    s = pd.Series(prices)
+def calc_macd(closes):
+    s = pd.Series(closes)
     ema12 = s.ewm(span=12).mean()
     ema26 = s.ewm(span=26).mean()
     return float(ema12.iloc[-1] - ema26.iloc[-1])
 
-def calc_atr(data, period=14):
-    highs = np.array([c["high"] for c in data])
-    lows = np.array([c["low"] for c in data])
-    closes = np.array([c["close"] for c in data])
-    tr = np.maximum(highs[1:], closes[:-1]) - np.minimum(lows[1:], closes[:-1])
+def calc_atr(klines, period=14):
+    highs = np.array([float(x[2]) for x in klines])
+    lows  = np.array([float(x[3]) for x in klines])
+    closes = np.array([float(x[4]) for x in klines])
+    prev = closes[:-1]
+    tr = np.maximum(highs[1:] - lows[1:], np.maximum(abs(highs[1:] - prev), abs(lows[1:] - prev)))
     return float(np.mean(tr[-period:]))
 
-# ============================================
-# Routes
-# ============================================
+# =============================
+#  ROUTES
+# =============================
 @app.route("/")
 def home():
-    return "ربات فعال است!"
+    return "سرور فعال است"
 
 @app.route("/status")
 def status():
     return jsonify({"running": True})
 
-@app.route("/telegram", methods=["GET", "POST"])
-def telegram():
-    text = request.args.get("text", "") or request.form.get("text", "")
-    res = send_telegram_message(text)
-    return jsonify({"sent": True, "response": res})
-
 @app.route("/scan")
 def scan():
-    k = ce_request("/market/kline", {"market": SYMBOL, "type": "1min", "limit": 150})
-    if "data" not in k:
-        return jsonify({"error": "CoinEx API error", "raw": k})
+    k = ce("/market/kline", {"market": SYMBOL, "type": "1min", "limit": 200})
+
+    if "data" not in k or not k["data"]:
+        return jsonify({"error": "CoinEx error", "raw": k})
 
     data = k["data"]
-    closes = [c["close"] for c in data]
+
+    if data[0][0] > data[-1][0]:
+        data.reverse()
+
+    closes = [float(x[4]) for x in data]
 
     macd = calc_macd(closes)
-    rsi = calc_rsi(closes)
-    atr = calc_atr(data)
-
+    rsi  = calc_rsi(closes)
+    atr  = calc_atr(data)
     price = closes[-1]
-
-    sl_long  = round(price - atr * 1.2, 2)
-    tp_long  = round(price + atr * 2.2, 2)
-    sl_short = round(price + atr * 1.2, 2)
-    tp_short = round(price - atr * 2.2, 2)
 
     signal = "none"
     if macd > 0 and rsi < 35:
-        signal = "buy"
+        signal = "BUY"
     elif macd < 0 and rsi > 65:
-        signal = "sell"
+        signal = "SELL"
+
+    message = f"""
+📊 Signal Alert
+Coin: {SYMBOL}
+Price: {price}
+
+MACD: {macd:.4f}
+RSI:  {rsi:.2f}
+ATR:  {atr:.2f}
+
+Signal → {signal}
+"""
+    send_telegram(message)
 
     return jsonify({
-        "price": price,
         "signal": signal,
+        "price": price,
         "macd": macd,
         "rsi": rsi,
-        "atr": atr,
-        "sl_long": sl_long,
-        "tp_long": tp_long,
-        "sl_short": sl_short,
-        "tp_short": tp_short
+        "atr": atr
     })
 
-# ============================================
-# Run Server
-# ============================================
+# =============================
+#  RUN
+# =============================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
