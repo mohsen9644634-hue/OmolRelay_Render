@@ -8,8 +8,8 @@ import threading
 # =========================
 # Configuration
 # =========================
-API_KEY = "YOUR_API_KEY"
-SECRET_KEY = "YOUR_SECRET_KEY"
+API_KEY = "9702A8DB3E074A45996BAC0E8D85F748"
+SECRET_KEY = "4029D375ED5D17344BB175DF9FB0B36EBC497F5BA389C4C1"
 BASE_URL = "https://api.coinex.com/perpetual/v1"
 
 SYMBOL = "BTCUSDT"
