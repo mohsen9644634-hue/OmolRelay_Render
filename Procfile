@@ -1,1 +1,1 @@
-web: python parnya.py
+
