@@ -128,6 +128,11 @@ Signal → {signal}
         "rsi": rsi,
         "atr": atr
     })
+@app.route('/telegram', methods=['GET', 'POST'])
+def telegram():
+    text = request.args.get('text', 'no-text')
+    out = send_telegram(text)
+    return jsonify(out)
 
 # =============================
 #  RUN
