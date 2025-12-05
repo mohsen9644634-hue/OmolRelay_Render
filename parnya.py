@@ -5,7 +5,7 @@ import json
 import hashlib
 import requests
 import threading
-from flask import Flask, request
+from flask import Flask, request, jsonify # Added jsonify
 
 ############################################################
 # CONFIG
@@ -47,6 +47,7 @@ def send_telegram(msg):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         params = {"chat_id": CHAT_ID, "text": msg}
         requests.get(url, params=params)
+        print(f"Telegram message sent: {msg}") # Added print for debugging
     except Exception as e:
         print("Telegram error:", e)
         sys.stdout.flush()
@@ -101,7 +102,10 @@ def get_klines():
 ############################################################
 
 def ema(data, period):
+    if len(data) < period: # Added check for sufficient data
+        return data[-1] # or handle error
     k = 2 / (period + 1)
+    # Ensure starting average is based on 'period' data points
     val = sum(data[:period]) / period
     for p in data[period:]:
         val = p * k + val * (1 - k)
@@ -109,22 +113,36 @@ def ema(data, period):
 
 
 def macd(data):
+    if len(data) < 26: # Need at least 26 data points for EMA26
+        return 0, 0 # Or handle error appropriately
     ema12 = ema(data, 12)
     ema26 = ema(data, 26)
     macd_line = ema12 - ema26
 
-    # Signal line = EMA9 of historical MACD (approx)
-    last_values = []
-    for i in range(35):
-        chunk = data[-(35 - i):]
-        if len(chunk) >= 26:
-            last_values.append(ema(chunk, 12) - ema(chunk, 26))
+    # Signal line = EMA9 of historical MACD
+    macd_history = []
+    # Generate MACD values for a sufficient history to calculate EMA9
+    # This part was already reasonably implemented in your code
+    for i in range(len(data) - 26, len(data)): # Iterate from earliest point that allows EMA26 to latest
+        if i >= 25: # Ensure there's enough data for both EMAs
+            current_ema12 = ema(data[:i+1], 12)
+            current_ema26 = ema(data[:i+1], 26)
+            macd_history.append(current_ema12 - current_ema26)
+    
+    # Take the last 9 MACD values if fewer than 9 are generated
+    if len(macd_history) < 9:
+        signal_line = 0 # Not enough history for signal line, or handle differently
+    else:
+        signal_line = ema(macd_history[-9:], 9) # EMA of last 9 MACD values
 
-    signal_line = ema(last_values, 9)
     return macd_line, signal_line
 
 
 def rsi(data, period=14):
+    if len(data) < period + 1: # Need at least period + 1 data points
+        return 50 # Default to 50 if not enough data
+    
+    # Your current RSI calculation (simple average)
     gains, losses = [], []
     for i in range(1, period + 1):
         diff = data[-i] - data[-i - 1]
@@ -133,12 +151,18 @@ def rsi(data, period=14):
         else:
             losses.append(abs(diff))
 
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
+    avg_gain = sum(gains) / period if gains else 0
+    avg_loss = sum(losses) / period if losses else 0
+    
     if avg_loss == 0:
-        return 100
+        return 100 if avg_gain > 0 else 50 # If no losses, RSI is 100 (or 50 if no gains either)
+    
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
+
+# Note: For accurate Wilder's RSI, the calculation needs to track previous avg_gain and avg_loss
+# and apply smoothing: new_avg_gain = (prev_avg_gain * (period - 1) + current_gain) / period
+# This current implementation is a simple SMA-based RSI.
 
 
 ############################################################
@@ -148,6 +172,7 @@ def rsi(data, period=14):
 def close_position():
     global current_position, entry_amount
     if current_position is None:
+        print("[CLOSE] No position to close.") # Added print
         return
 
     print("[CLOSE] Closing position:", current_position)
@@ -166,14 +191,19 @@ def close_position():
     send_telegram(f"Position closed ({current_position}).")
 
     current_position = None
-
+    entry_amount = None # Reset entry amount
 
 def open_position(direction, price):
     global current_position, entry_price, trailing_active, entry_amount
 
-    balance = 100  # backtest baseline
+    if current_position is not None:
+        print(f"[OPEN] Already in a {current_position} position.") # Added print
+        return # Prevent opening a new position if one is already open
+
+    # TODO: Fetch actual balance from CoinEx API for LIVE trading
+    balance = 100  # <<< WARNING: This is a fixed backtest baseline, not live balance!
     amount = (balance * POSITION_SIZE_PERCENT * LEVERAGE) / price
-    entry_amount = round(amount, 3)
+    entry_amount = round(amount, 3) # Make sure this is within CoinEx's min/max limits
 
     side = "buy" if direction == "LONG" else "sell"
 
@@ -185,15 +215,19 @@ def open_position(direction, price):
         "client_id": str(int(time.time()))
     }
 
-    coinex_request("/order/put_market", params)
+    response = coinex_request("/order/put_market", params)
+    
+    # Only update position if order was successful
+    if response and response.get('code') == 0: # Assuming 'code': 0 means success
+        current_position = direction
+        entry_price = price
+        trailing_active = False
 
-    current_position = direction
-    entry_price = price
-    trailing_active = False
-
-    send_telegram(
-        f"NEW {direction}\nEntry: {price}\nLeverage: {LEVERAGE}x\nTP: {TP_PERCENT}%\nSL: {SL_PERCENT}%"
-    )
+        send_telegram(
+            f"NEW {direction}\nEntry: {price}\nLeverage: {LEVERAGE}x\nTP: {TP_PERCENT}%\nSL: {SL_PERCENT}%"
+        )
+    else:
+        print(f"Failed to open {direction} position: {response}")
 
 
 ############################################################
@@ -203,12 +237,12 @@ def open_position(direction, price):
 def check_tp_sl_trailing(current_price):
     global current_position, entry_price, trailing_active
 
-    if current_position is None:
+    if current_position is None or entry_price is None: # Added check for entry_price
         return
 
     if current_position == "LONG":
         profit = ((current_price - entry_price) / entry_price) * 100
-    else:
+    else: # current_position == "SHORT"
         profit = ((entry_price - current_price) / entry_price) * 100
 
     if not trailing_active and profit >= TRIGGER_TRAIL:
@@ -216,18 +250,18 @@ def check_tp_sl_trailing(current_price):
         send_telegram("Trailing Activated")
 
     if profit >= TP_PERCENT:
+        send_telegram("TP HIT") # Send message BEFORE closing
         close_position()
-        send_telegram("TP HIT")
         return
 
     if profit <= -SL_PERCENT:
+        send_telegram("SL HIT") # Send message BEFORE closing
         close_position()
-        send_telegram("SL HIT")
         return
 
     if trailing_active and profit <= (TRIGGER_TRAIL - TRAIL_DISTANCE):
+        send_telegram("TRAILING STOP HIT") # Send message BEFORE closing
         close_position()
-        send_telegram("TRAILING STOP HIT")
         return
 
 
@@ -237,13 +271,17 @@ def check_tp_sl_trailing(current_price):
 
 def strategy():
     prices = get_klines()
+    if not prices: # Handle case where klines is empty
+        print("Strategy Error: No klines data available.")
+        return "NONE"
+
     last = prices[-1]
 
     macd_line, signal_line = macd(prices)
     ema50 = ema(prices, 50)
     rsi_value = rsi(prices)
 
-    print("MACD:", macd_line, "Signal:", signal_line, "RSI:", rsi_value)
+    print("MACD:", macd_line, "Signal:", signal_line, "RSI:", rsi_value, "Last Price:", last) # Added last price for debug
 
     # BUY
     if macd_line > signal_line and last > ema50 and rsi_value > 50:
@@ -270,36 +308,39 @@ def main_loop():
 
             # OPEN LONG
             if sig == "BUY" and current_position != "LONG":
-                close_position()
+                close_position() # Close any existing position first
                 open_position("LONG", price)
 
             # OPEN SHORT
             elif sig == "SELL" and current_position != "SHORT":
-                close_position()
+                close_position() # Close any existing position first
                 open_position("SHORT", price)
 
         except Exception as e:
             print("Main Loop Error:", e)
+            sys.stdout.flush() # Flush print statements immediately
 
         time.sleep(20)
 
 
 ############################################################
-# HEARTBEAT
+# PERIODIC HEARTBEAT (New name to avoid conflict)
 ############################################################
 
-def heartbeat():
-    send_telegram("Heartbeat: Running")
-    threading.Timer(300, heartbeat).start()
+def periodic_heartbeat(): # Renamed to avoid conflict
+    send_telegram("Heartbeat: Bot is alive and well!")
+    # Reschedule itself
+    threading.Timer(300, periodic_heartbeat).start()
 
 
 ############################################################
 # ROUTES
 ############################################################
 
+# Renamed the main "/" route for clarity and removed the duplicate
 @app.route("/")
-def home():
-    return "Bot Running"
+def home_status():
+    return "Bot is running — Model: M15 — Status: OK"
 
 @app.route("/status")
 def status():
@@ -309,25 +350,6 @@ def status():
 def test():
     send_telegram("Test OK")
     return "OK"
-
-
-############################################################
-# STARTUP
-############################################################
-
-if __name__ == "__main__":
-    threading.Thread(target=main_loop).start()
-    heartbeat()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-#########################################
-# EXTRA ROUTES (STATUS + DEBUG + TOOLS)
-#########################################
-
-from flask import jsonify
-
-@app.route("/")
-def home():
-    return "Bot is running — Model: M15 — Status: OK"
 
 @app.route("/envcheck")
 def envcheck():
@@ -341,22 +363,40 @@ def envcheck():
 @app.route("/debug")
 def debug():
     try:
-        k = get_klines("BTCUSDT", "15m", 100)
+        # Corrected get_klines call (no args)
+        k = get_klines()
+        if not k:
+            return jsonify({"error": "No klines data available for debug."})
+            
         macd_line, signal_line = macd(k)
         rsi_value = rsi(k)
         ema50_value = ema(k, 50)
 
         return jsonify({
-            "last_price": k[-1]["close"],
+            "last_price": k[-1], # Corrected access to last price (it's a float)
             "ema50": ema50_value,
             "macd": macd_line,
             "signal": signal_line,
-            "rsi": rsi_value
+            "rsi": rsi_value,
+            "current_position": current_position, # Added current position
+            "entry_price": entry_price # Added entry price
         })
     except Exception as e:
-        return jsonify({"error": str(e)})
+        print("Debug Route Error:", e) # Print error for server logs
+        return jsonify({"error": str(e)}), 500 # Return 500 for server errors
 
+# Renamed the heartbeat route function to avoid conflict with the periodic_heartbeat function
 @app.route("/heartbeat")
-def heartbeat():
-    send_telegram("Heartbeat: Running")
-    return "Heartbeat sent"
+def send_heartbeat_response(): 
+    send_telegram("Heartbeat route triggered: Bot is alive.")
+    return "Heartbeat sent via route"
+
+
+############################################################
+# STARTUP
+############################################################
+
+if __name__ == "__main__":
+    threading.Thread(target=main_loop, daemon=True).start() # daemon=True ensures thread exits with main app
+    periodic_heartbeat() # Call the correctly named periodic heartbeat
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
