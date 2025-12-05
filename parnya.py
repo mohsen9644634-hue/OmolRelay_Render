@@ -319,3 +319,44 @@ if __name__ == "__main__":
     threading.Thread(target=main_loop).start()
     heartbeat()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+#########################################
+# EXTRA ROUTES (STATUS + DEBUG + TOOLS)
+#########################################
+
+from flask import jsonify
+
+@app.route("/")
+def home():
+    return "Bot is running — Model: M15 — Status: OK"
+
+@app.route("/envcheck")
+def envcheck():
+    return jsonify({
+        "API_KEY": "OK" if API_KEY else "Missing",
+        "API_SECRET": "OK" if API_SECRET else "Missing",
+        "TELEGRAM_TOKEN": "OK" if TELEGRAM_TOKEN else "Missing",
+        "CHAT_ID": "OK" if CHAT_ID else "Missing"
+    })
+
+@app.route("/debug")
+def debug():
+    try:
+        k = get_klines("BTCUSDT", "15m", 100)
+        macd_line, signal_line = macd(k)
+        rsi_value = rsi(k)
+        ema50_value = ema(k, 50)
+
+        return jsonify({
+            "last_price": k[-1]["close"],
+            "ema50": ema50_value,
+            "macd": macd_line,
+            "signal": signal_line,
+            "rsi": rsi_value
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+@app.route("/heartbeat")
+def heartbeat():
+    send_telegram("Heartbeat: Running")
+    return "Heartbeat sent"
