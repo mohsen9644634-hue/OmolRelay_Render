@@ -33,6 +33,7 @@ def send_telegram(msg):
         )
     except:
         pass
+    send_telegram("Test: Bot Telegram Connection OK")
 
 def coinex_sign(params):
     sorted_params = "".join([f"{k}{params[k]}" for k in sorted(params)])
