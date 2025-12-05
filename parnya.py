@@ -11,7 +11,7 @@ from flask import Flask, request
 ############################################################
 
 # Toggle switch for real trading
-LIVE = False   # Set to True to enable real orders
+LIVE = True   # Set to True to enable real orders
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
