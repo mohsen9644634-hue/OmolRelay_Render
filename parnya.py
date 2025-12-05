@@ -209,10 +209,18 @@ def main_loop():
 def heartbeat():
     send_telegram("Heartbeat: ربات فعال است.")
     threading.Timer(300, heartbeat).start()
-
+    
 @app.route("/status")
 def status():
     return "Bot is running"
+    
+@app.route("/telegram")
+def telegram_route():
+    text = request.args.get("text", "")
+    if not text:
+        return "Error: text parameter required", 400
+    send_telegram(text)
+    return "Message sent"
 
 if __name__ == "__main__":
     threading.Thread(target=main_loop).start()
