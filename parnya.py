@@ -2,6 +2,23 @@ from flask import Flask, jsonify
 import requests, time, hmac, hashlib, threading, os
 
 app = Flask(__name__)
+def get_price(symbol):
+    url = f"https://api.coinex.com/v1/market/ticker?market={symbol}"
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status() # Raise an exception for bad status codes
+        data = response.json()
+        if data and data["code"] == 0 and data["data"] and data["data"]["ticker"]:
+            return float(data["data"]["ticker"]["last"])
+        else:
+            send_telegram(f"Error fetching price for {symbol}: {data}")
+            return None
+    except requests.exceptions.RequestException as e:
+        send_telegram(f"Network error fetching price for {symbol}: {e}")
+        return None
+    except Exception as e:
+        send_telegram(f"Unknown error fetching price for {symbol}: {e}")
+        return None
 
 BASE_URL = "https://api.coinex.com/v1"
 SYMBOL = "BTCUSDT"
