@@ -230,6 +230,14 @@ def signal_view():
 def debug():
     c = get_klines(PERIOD_MAIN)
     return jsonify({"candles": len(c)})
+    
+@app.route("/price")
+def price():
+    try:
+        price = get_price("BTCUSDT")
+        return {"price": price}
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
