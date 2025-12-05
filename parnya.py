@@ -7,11 +7,16 @@ import threading
 from flask import Flask, request
 
 app = Flask(__name__)
+@app.route("/test")
+def test():
+    send_telegram("Test OK from Render")
+    return "Telegram test sent"
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID") 
+CHAT_ID = os.getenv("CHAT_ID")
+
 SYMBOL = "BTCUSDT"
 LEVERAGE = 15
 POSITION_SIZE_PERCENT = 0.70
