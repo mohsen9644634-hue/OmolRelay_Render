@@ -1,3 +1,4 @@
+import os
 import time
 import hmac
 import hashlib
@@ -7,11 +8,10 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-API_KEY = "YOUR_COINEX_API_KEY"
-API_SECRET = "YOUR_COINEX_API_SECRET"
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-CHAT_ID = "YOUR_CHAT_ID"
-
+API_KEY = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID") 
 SYMBOL = "BTCUSDT"
 LEVERAGE = 15
 POSITION_SIZE_PERCENT = 0.70
@@ -27,13 +27,15 @@ trailing_active = False
 
 def send_telegram(msg):
     try:
-        requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            params={"chat_id": CHAT_ID, "text": msg}
-        )
-    except:
-        pass
-    send_telegram("Test: Bot Telegram Connection OK")
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        params = {"chat_id": CHAT_ID, "text": msg}
+        r = requests.get(url, params=params)
+
+        print("Telegram status:", r.status_code)
+        print("Telegram response:", r.text)
+
+    except Exception as e:
+        print("Telegram send error:", str(e))
 
 def coinex_sign(params):
     sorted_params = "".join([f"{k}{params[k]}" for k in sorted(params)])
@@ -207,4 +209,6 @@ def status():
 if __name__ == "__main__":
     threading.Thread(target=main_loop).start()
     heartbeat()
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
+
