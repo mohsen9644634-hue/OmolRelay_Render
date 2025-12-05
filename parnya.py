@@ -1,3 +1,4 @@
+import sys
 import os
 import time
 import hmac
@@ -38,9 +39,11 @@ def send_telegram(msg):
 
         print("Telegram status:", r.status_code)
         print("Telegram response:", r.text)
+        sys.stdout.flush()
 
     except Exception as e:
         print("Telegram send error:", str(e))
+        sys.stdout.flush()
 
 def coinex_sign(params):
     sorted_params = "".join([f"{k}{params[k]}" for k in sorted(params)])
