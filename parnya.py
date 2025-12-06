@@ -1,228 +1,497 @@
+# ===========================
+#   FUTURES PRO+ BOT (PART 1)
+#   Indicators + Signal Engine
+#   M15 – MACD/EMA/RSI/ATR
+#   Ultra PRO+ REAL MODE
+# ===========================
+
 import os
 import time
-import threading
-from flask import Flask, request, jsonify
 import requests
-import hmac
-import hashlib
-import json
-import base64
+import numpy as np
 from datetime import datetime
 
-# --- Global Variables ---
-app = Flask(__name__)
-bot_running = True
-start_time = datetime.now()
+PAIR = "BTCUSDT"
+TIMEFRAME = "15min"
 
-# --- Utility Functions ---
-def get_signature(payload, secret_key):
-    """Generates a CoinEx API signature."""
-    sha256 = hmac.new(secret_key.encode(), payload.encode(), hashlib.sha256).digest()
-    return base64.b64encode(sha256).decode().strip()
-
-def send_telegram(message, chat_id=None):
-    """Sends a message to Telegram."""
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    if chat_id is None:
-        TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-    else:
-        TELEGRAM_CHAT_ID = chat_id # Use provided chat_id if available
-
-    if not TELEGRAM_BOT_TOKEN:
-        print("Telegram BOT_TOKEN not set in environment variables. Cannot send message.")
-        return False
-    if not TELEGRAM_CHAT_ID:
-        print("Telegram CHAT_ID not set in environment variables (or not provided). Cannot send message.")
-        return False
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML" # Optional: for rich text formatting
-    }
+# ===========================
+#   FETCH KLINES (SPOT)
+# ===========================
+def get_klines():
     try:
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
-        print(f"Telegram message sent to {TELEGRAM_CHAT_ID}: {message}")
-        return True
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending Telegram message: {e}")
-        return False
+        url = f"https://api.coinex.com/v1/market/kline?market={PAIR}&type={TIMEFRAME}&limit=120"
+        r = requests.get(url, timeout=5).json()
+        data = r["data"]["kline"]
+        closes = [float(c[2]) for c in data]  # close price
+        highs  = [float(c[3]) for c in data]
+        lows   = [float(c[4]) for c in data]
+        return np.array(closes), np.array(highs), np.array(lows)
+    except:
+        return None, None, None
 
-# --- CoinEx API Interaction (simplified for example) ---
-def get_spot_kline(market="BTCUSDT", type="1min", limit=1):
-    """Fetches KLine data from CoinEx Spot API."""
-    url = f"https://api.coinex.com/v1/market/kline?market={market}&type={type}&limit={limit}"
+# ===========================
+#   EMA FUNCTION
+# ===========================
+def EMA(series, period):
+    return np.convolve(series, np.ones(period)/period, mode='valid')
+
+# ===========================
+#   RSI FUNCTION
+# ===========================
+def RSI(closes, period=14):
+    delta = np.diff(closes)
+    up = np.where(delta > 0, delta, 0)
+    down = np.where(delta < 0, -delta, 0)
+    avg_up = np.convolve(up, np.ones(period)/period, mode="valid")
+    avg_down = np.convolve(down, np.ones(period)/period, mode="valid")
+    rs = avg_up / (avg_down + 1e-9)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+# ===========================
+#   MACD FUNCTION
+# ===========================
+def MACD(closes):
+    ema12 = EMA(closes, 12)
+    ema26 = EMA(closes, 26)
+    macd_line = ema12[-len(ema26):] - ema26
+    signal = EMA(macd_line, 9)
+    hist = macd_line[-len(signal):] - signal
+    return macd_line[-1], signal[-1], hist[-1]
+
+# ===========================
+#   ATR FUNCTION
+# ===========================
+def ATR(highs, lows, closes, period=14):
+    tr = np.maximum(highs[1:], closes[:-1]) - np.minimum(lows[1:], closes[:-1])
+    atr = EMA(tr, period)
+    return atr[-1]
+
+# ===========================
+#   SIGNAL ENGINE (PRO MODE)
+# ===========================
+def generate_signal():
+    closes, highs, lows = get_klines()
+    if closes is None:
+        return None
+
+    price = closes[-1]
+
+    # Indicators
+    ema20  = EMA(closes, 20)[-1]
+    ema50  = EMA(closes, 50)[-1]
+    rsi14  = RSI(closes, 14)[-1]
+    macd, macd_signal, macd_hist = MACD(closes)
+    atr14 = ATR(highs, lows, closes, 14)
+
+    trend_up = ema20 > ema50
+    trend_down = ema20 < ema50
+
+    # ===========================
+    #   BUY LOGIC – PRO MODE
+    # ===========================
+    buy = (
+        trend_up and
+        macd > macd_signal and
+        macd_hist > 0 and
+        45 < rsi14 < 70
+    )
+
+    # ===========================
+    #   SELL LOGIC – PRO MODE
+    # ===========================
+    sell = (
+        trend_down and
+        macd < macd_signal and
+        macd_hist < 0 and
+        30 < rsi14 < 55
+    )
+
+    if buy:
+        return {
+            "signal": "BUY",
+            "price": price,
+            "atr": atr14,
+            "ema20": ema20,
+            "ema50": ema50,
+            "rsi": rsi14,
+            "macd": macd,
+            "macd_signal": macd_signal,
+            "macd_hist": macd_hist
+        }
+
+    if sell:
+        return {
+            "signal": "SELL",
+            "price": price,
+            "atr": atr14,
+            "ema20": ema20,
+            "ema50": ema50,
+            "rsi": rsi14,
+            "macd": macd,
+            "macd_signal": macd_signal,
+            "macd_hist": macd_hist
+        }
+
+    return None
+# ===========================
+#   FUTURES PRO+ BOT (PART 2)
+#   Trade Executor + REAL MODE
+#   Auto Position + Trailing TP
+# ===========================
+
+API_KEY = os.getenv("API_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+BASE_URL = "https://api.coinex.com/perpetual/v1"
+
+current_position = None     # "LONG" or "SHORT" or None
+entry_price = None
+position_size = 0
+trailing_active = False
+trailing_price = None       # آخرین قیمت دنبال‌کننده سود
+last_signal_time = 0        # جلوگیری از اسپم
+
+# ===========================
+#   SEND TELEGRAM MESSAGE
+# ===========================
+def send_telegram(msg):
     try:
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()
-        if data and data['code'] == 0 and data['data']:
-            # Assuming the latest kline is the last element
-            kline = data['data'][-1]
-            # KLine structure: [timestamp, open, close, high, low, volume, amount]
-            return {
-                "timestamp": kline[0],
-                "open": float(kline[1]),
-                "close": float(kline[2]),
-                "high": float(kline[3]),
-                "low": float(kline[4]),
-                "volume": float(kline[5]),
-                "amount": float(kline[6])
-            }
-        else:
-            print(f"Error or empty data fetching spot kline: {data}")
-            return None
-    except requests.exceptions.RequestException as e:
-        print(f"Network error fetching spot kline: {e}")
-        return None
-    except Exception as e:
-        print(f"Error processing spot kline data: {e}")
-        return None
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        data = {"chat_id": CHAT_ID, "text": msg}
+        requests.post(url, data=data, timeout=5)
+    except:
+        pass
 
-def fetch_futures_balance():
-    """Fetches CoinEx Futures account balance."""
-    API_KEY = os.getenv("API_KEY")
-    SECRET_KEY = os.getenv("SECRET_KEY")
-    if not API_KEY or not SECRET_KEY:
-        print("CoinEx API_KEY or SECRET_KEY not set in environment variables. Cannot fetch balance.")
-        return None
+# ===========================
+#   AUTH SIGN FUNCTION
+# ===========================
+import hmac
+import hashlib
 
-    url = "https://api.coinex.com/perpetual/v1/account/assets"
-    timestamp = int(time.time() * 1000)
+def sign_request(params):
+    sorted_params = "&".join([f"{k}={v}" for k,v in sorted(params.items())])
+    to_sign = sorted_params + SECRET_KEY
+    return hashlib.md5(to_sign.encode()).hexdigest()
+
+# ===========================
+#   FUTURES BALANCE
+# ===========================
+def get_balance():
+    url = f"{BASE_URL}/asset/query"
     params = {
         "access_id": API_KEY,
-        "timestamp": timestamp,
+        "timestamp": int(time.time()*1000)
     }
-    sorted_params = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
-    signature = get_signature(sorted_params, SECRET_KEY)
+    params["sign"] = sign_request(params)
+    r = requests.get(url, params=params, timeout=5).json()
+    try:
+        return float(r["data"]["assets"][0]["available"])
+    except:
+        return 0
 
-    headers = {
-        "Authorization": f"HMAC-SHA256 ApiKey={API_KEY},Signature={signature},Timestamp={timestamp}",
-        "Content-Type": "application/json"
+# ===========================
+#   PLACE ORDER (REAL MODE)
+# ===========================
+def place_order(side, amount):
+    url = f"{BASE_URL}/order/put_market"
+
+    params = {
+        "access_id": API_KEY,
+        "market": PAIR,
+        "side": side,         # buy یا sell
+        "amount": amount,
+        "timestamp": int(time.time()*1000)
     }
+    params["sign"] = sign_request(params)
 
     try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        if data and data['code'] == 0:
-            # Simplified balance extraction
-            usdt_asset = next((asset for asset in data['data']['assets'] if asset['asset'] == 'USDT'), None)
-            if usdt_asset:
-                return float(usdt_asset['available_balance'])
-            else:
-                print("USDT asset not found in futures balance.")
-                return 0.0
-        else:
-            print(f"Error fetching futures balance: {data}")
-            return None
-    except requests.exceptions.RequestException as e:
-        print(f"Network error fetching futures balance: {e}")
-        return None
-    except Exception as e:
-        print(f"Error processing futures balance data: {e}")
+        r = requests.post(url, data=params, timeout=5).json()
+        return r
+    except:
         return None
 
-# --- Bot Logic Loop ---
+# ===========================
+#   CLOSE ANY OPEN ORDER
+# ===========================
+def close_position():
+    global current_position, position_size
+
+    if current_position == "LONG":
+        place_order("sell", position_size)
+
+    elif current_position == "SHORT":
+        place_order("buy", position_size)
+
+    current_position = None
+    position_size = 0
+
+# ===========================
+#   START NEW POSITION
+# ===========================
+def open_position(direction, price, atr):
+    global current_position, entry_price, trailing_active, trailing_price, position_size
+
+    balance = get_balance()
+    if balance <= 1:
+        send_telegram("❗ بالانس کافی نیست")
+        return
+
+    # 80% موجودی
+    position_size = round(balance * 0.8 / price * 15, 3)
+
+    # اجرای سفارش
+    if direction == "BUY":
+        place_order("buy", position_size)
+        current_position = "LONG"
+
+    elif direction == "SELL":
+        place_order("sell", position_size)
+        current_position = "SHORT"
+
+    entry_price = price
+    trailing_active = True
+
+    # فاصله شروع Trailing
+    trailing_price = entry_price + atr if current_position == "LONG" else entry_price - atr
+
+    send_telegram(f"""
+🚀 پوزیشن جدید باز شد
+
+نوع: {current_position}
+ورود: {price}
+ATR: {atr}
+اندازه: {position_size}
+Leverage: 15x
+Trailing SL فعال شد
+""")
+
+# ===========================
+#   TRAILING STOP SYSTEM
+# ===========================
+def trailing_system(current_price, atr):
+    global trailing_price, trailing_active
+
+    if not trailing_active:
+        return False
+
+    # LONG
+    if current_position == "LONG":
+        # اگر قیمت بالاتر رفت، تریلینگ هم بالا بیاید
+        if current_price - atr > trailing_price:
+            trailing_price = current_price - atr
+
+        # اگر قیمت برگشت و SL فعال شد
+        if current_price < trailing_price:
+            send_telegram("🟡 Trailing SL (LONG) فعال شد")
+            return True
+
+    # SHORT
+    if current_position == "SHORT":
+        if current_price + atr < trailing_price:
+            trailing_price = current_price + atr
+
+        if current_price > trailing_price:
+            send_telegram("🟡 Trailing SL (SHORT) فعال شد")
+            return True
+
+    return False
+
+# ===========================
+#   MASTER TRADE HANDLER
+# ===========================
+def execute_trade(signal):
+    global current_position, entry_price, last_signal_time
+
+    if signal is None:
+        return
+
+    action = signal["signal"]
+    price = signal["price"]
+    atr = signal["atr"]
+
+    # ضد اسپم
+    if time.time() - last_signal_time < 30:
+        return
+    last_signal_time = time.time()
+
+    # اگر پوزیشن باز داریم → Trailing SL چک شود
+    if current_position is not None:
+        hit = trailing_system(price, atr)
+        if hit:
+            close_position()
+            send_telegram("🔻 پوزیشن بسته شد (Trailing)")
+            return
+
+    # اگر BUY آمد ولی SHORT بودیم → معکوس کن
+    if action == "BUY":
+        if current_position == "SHORT":
+            close_position()
+            send_telegram("🔄 معکوس SHORT → LONG")
+            open_position("BUY", price, atr)
+            return
+
+        if current_position is None:
+            open_position("BUY", price, atr)
+            return
+
+    # اگر SELL آمد ولی LONG بودیم → معکوس کن
+    if action == "SELL":
+        if current_position == "LONG":
+            close_position()
+            send_telegram("🔄 معکوس LONG → SHORT")
+            open_position("SELL", price, atr)
+            return
+
+        if current_position is None:
+            open_position("SELL", price, atr)
+            return
+# ===========================
+#   FUTURES PRO+ BOT (PART 3)
+#   Flask Server + Threading
+#   Main Bot Loop + Render Deploy
+# ===========================
+
+from flask import Flask, jsonify, request
+import threading
+import sys
+import time
+import os
+import requests
+from datetime import datetime
+
+# ===========================
+#   GLOBAL BOT CONTROL
+# ===========================
+bot_running = True
+last_heartbeat_time = 0
+HEARTBEAT_INTERVAL = 60 * 10 # 10 minutes
+
+# ===========================
+#   FLASK APP SETUP
+# ===========================
+app = Flask(__name__)
+
+# ===========================
+#   BOT MAIN LOOP
+# ===========================
 def bot_loop():
-    """Main trading bot logic."""
-    global bot_running
+    global bot_running, last_heartbeat_time
+    print("Bot loop started.")
+    send_telegram("🚀 ربات Ultra PRO++ Futures شروع به کار کرد (M15 - Trailing TP)!")
+
     while bot_running:
-        print("Bot loop running...")
-        kline_data = get_spot_kline()
-        if kline_data:
-            print(f"Latest KLine (Spot): {kline_data}")
-            # Here you would implement your MACD/EMA50/RSI/ATR strategy
-            # For demonstration, let's just log and sleep
-            send_telegram(f"Bot active. Latest close: {kline_data['close']}")
-        else:
-            print("Failed to get KLine data.")
-            send_telegram("Bot warning: Failed to get KLine data.")
+        try:
+            current_time = time.time()
+            if current_time - last_heartbeat_time > HEARTBEAT_INTERVAL:
+                closes, _, _ = get_klines()
+                if closes is not None:
+                    send_telegram(f"❤️ ربات فعال است. آخرین قیمت: {closes[-1]}")
+                last_heartbeat_time = current_time
 
-        futures_balance = fetch_futures_balance()
-        if futures_balance is not None:
-            print(f"Futures USDT Available Balance: {futures_balance}")
-        else:
-            print("Failed to get futures balance.")
+            signal = generate_signal()
+            if signal:
+                execute_trade(signal)
+            
+            time.sleep(30) # هر 30 ثانیه یکبار چک می کند
 
-        time.sleep(60) # Run every minute
+        except Exception as e:
+            send_telegram(f"❌ خطای بحرانی در Bot Loop: {str(e)}")
+            print(f"Error in bot_loop: {e}")
+            time.sleep(60) # در صورت خطا یک دقیقه صبر کن
 
-# --- Flask Routes ---
-@app.route('/')
+    send_telegram("⛔️ ربات متوقف شد.")
+    print("Bot loop stopped.")
+
+# ===========================
+#   FLASK ROUTES
+# ===========================
+@app.route("/")
 def home():
-    """Root endpoint."""
-    return "Ultra PRO++ Render-STABLE Bot Running"
+    status = "Running" if bot_running else "Stopped"
+    return f"Ultra PRO++ Render-STABLE Bot Running. Status: {status}"
 
-@app.route('/status')
+@app.route("/status")
 def status():
-    """Returns bot status and uptime."""
-    uptime = datetime.now() - start_time
-    status_message = {
-        "status": "Running" if bot_running else "Stopped",
-        "uptime": str(uptime),
-        "version": "Ultra PRO++ Render-STABLE",
-        "message": "Bot is operational. Check logs for strategy execution details."
-    }
-    return jsonify(status_message)
+    status_text = "Running" if bot_running else "Stopped"
+    return jsonify({
+        "status": status_text,
+        "uptime": str(datetime.now() - start_time),
+        "current_position": current_position,
+        "entry_price": entry_price,
+        "position_size": position_size,
+        "trailing_active": trailing_active,
+        "trailing_price": trailing_price
+    })
 
-@app.route('/kill')
+@app.route("/kill")
 def kill_bot():
-    """Stops the bot loop."""
     global bot_running
-    if bot_running:
-        bot_running = False
-        send_telegram("Bot has been commanded to stop.")
-        return "Bot stopping..."
-    return "Bot already stopped."
+    bot_running = False
+    send_telegram("🚨 دستور توقف دریافت شد. ربات متوقف می‌شود.")
+    return "Bot stopping..."
 
-@app.route('/start')
+@app.route("/start")
 def start_bot():
-    """Starts the bot loop."""
     global bot_running
     if not bot_running:
         bot_running = True
         threading.Thread(target=bot_loop).start()
-        send_telegram("Bot has been commanded to start.")
+        send_telegram("✅ دستور شروع مجدد دریافت شد. ربات شروع به کار کرد.")
         return "Bot starting..."
     return "Bot already running."
 
-@app.route('/test')
-def test_telegram_connection():
-    """Tests Telegram message sending."""
-    message = "Test OK from Render"
-    if send_telegram(message):
-        return "Telegram test sent"
-    else:
-        return "Failed to send Telegram test message. Check logs."
-
-@app.route('/telegram', methods=['POST'])
+@app.route("/telegram", methods=["POST"])
 def telegram_webhook():
-    """Handles incoming Telegram webhook updates."""
     try:
-        update = request.get_json()
-        if update:
-            print(f"Received Telegram update: {json.dumps(update, indent=2)}")
-            # --- You can add your logic here to process incoming Telegram messages ---
-            if 'message' in update and 'text' in update['message']:
-                user_message = update['message']['text']
-                chat_id = update['message']['chat']['id']
-                print(f"Message from {chat_id}: {user_message}")
-                # Example: send a simple echo reply back to the user
-                # send_telegram(f"Echo: {user_message}", chat_id=chat_id)
-            # ---------------------------------------------------------------------
-            return jsonify({"status": "ok", "message": "Update received"}), 200
-        else:
-            print("Received empty or invalid Telegram update.")
-            return jsonify({"status": "error", "message": "Invalid update"}), 400
-    except Exception as e:
-        print(f"Error processing Telegram webhook: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        data = request.json
+        if "message" in data:
+            chat_id = data["message"]["chat"]["id"]
+            text = data["message"]["text"]
+            
+            # Example command handling
+            if text == "/status":
+                status_data = status().json
+                send_telegram(f"""
+وضعیت ربات: {status_data['status']}
+Uptime: {status_data['uptime']}
+پوزیشن فعلی: {status_data['current_position']}
+قیمت ورود: {status_data['entry_price']}
+اندازه پوزیشن: {status_data['position_size']}
+تریلینگ فعال: {status_data['trailing_active']}
+قیمت تریلینگ: {status_data['trailing_price']}
+                """)
+            elif text == "/kill":
+                kill_bot()
+            elif text == "/start":
+                start_bot()
+            else:
+                send_telegram(f"پیام دریافتی: {text}")
 
-# --- Main execution ---
-if __name__ == '__main__':
-    # Start the bot logic in a separate thread
-    threading.Thread(target=bot_loop).start()
-    # Run the Flask app
-    app.run(host='0.0.0.0', port=os.getenv("PORT", 10000))
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        send_telegram(f"❌ خطای تلگرام وب‌هوک: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/test")
+def test_telegram():
+    send_telegram("تست تلگرام موفق بود! ربات پاسخ می‌دهد.")
+    return "Telegram test message sent."
+
+# ===========================
+#   MAIN ENTRY POINT
+# ===========================
+if __name__ == "__main__":
+    start_time = datetime.now()
+    
+    # Start the bot loop in a separate thread
+    bot_thread = threading.Thread(target=bot_loop)
+    bot_thread.daemon = True # Allow main program to exit even if thread is running
+    bot_thread.start()
+
+    # Get port from environment variable provided by Render
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
