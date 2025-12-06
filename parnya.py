@@ -447,34 +447,52 @@ def start_bot():
 def telegram_webhook():
     try:
         data = request.json
+        print("Telegram update:", data)
+
+        # تشخیص نوع پیام
         if "message" in data:
-            chat_id = data["message"]["chat"]["id"]
-            text = data["message"]["text"]
-            
-            # Example command handling
-            if text == "/status":
-                status_data = status().json
-                send_telegram(f"""
-وضعیت ربات: {status_data['status']}
-Uptime: {status_data['uptime']}
-پوزیشن فعلی: {status_data['current_position']}
-قیمت ورود: {status_data['entry_price']}
-اندازه پوزیشن: {status_data['position_size']}
-تریلینگ فعال: {status_data['trailing_active']}
-قیمت تریلینگ: {status_data['trailing_price']}
-                """)
-            elif text == "/kill":
-                kill_bot()
-            elif text == "/start":
-                start_bot()
-            else:
-                send_telegram(f"پیام دریافتی: {text}")
+            message = data["message"]
+        elif "edited_message" in data:
+            message = data["edited_message"]
+        else:
+            return jsonify({"status": "ignored"})
+
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "").strip()
+
+        # تبدیل به lowercase و حذف @botname
+        text = text.split("@")[0].lower()
+
+        # ارسال دستور /status
+        if text == "/status":
+            status_data = status().json
+            send_telegram(
+                f"وضعیت ربات:\n"
+                f"Uptime: {status_data['uptime']}\n"
+                f"پوزیشن فعلی: {status_data['current_position']}\n"
+                f"ورود: {status_data['entry_price']}\n"
+                f"سایز: {status_data['position_size']}\n"
+                f"تریلینگ: {status_data['trailing_active']}\n"
+                f"قیمت تریلینگ: {status_data['trailing_price']}"
+            )
+
+        elif text == "/kill":
+            kill_bot()
+            send_telegram("ربات متوقف شد.")
+
+        elif text == "/start":
+            start_bot()
+            send_telegram("ربات شروع به کار کرد.")
+
+        else:
+            send_telegram(f"دستور ناشناس دریافت شد: {text}")
 
         return jsonify({"status": "ok"})
-    except Exception as e:
-        send_telegram(f"❌ خطای تلگرام وب‌هوک: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)})
 
+    except Exception as e:
+        print("Telegram error:", str(e))
+        send_telegram(f"❌ خطای تلگرام: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)})
 
 @app.route("/test")
 def test_telegram():
