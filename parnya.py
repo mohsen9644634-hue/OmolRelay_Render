@@ -299,6 +299,24 @@ def trailing_system(current_price, atr):
 
     return False
 
+@app.route('/telegram', methods=['POST'])
+def telegram_webhook():
+    data = request.get_json()
+
+    if "message" in data:
+        text = data["message"].get("text", "")
+
+        if text == "/status":
+            st = "Running" if bot_running else "Stopped"
+            send_telegram(f"Status: {st}")
+
+        elif text == "/kill":
+            global bot_running
+            bot_running = False
+            send_telegram("Bot stopped.")
+
+    return "OK"
+
 # ===========================
 #   MASTER TRADE HANDLER
 # ===========================
