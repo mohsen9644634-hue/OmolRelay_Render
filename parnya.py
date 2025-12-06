@@ -464,27 +464,26 @@ def telegram_webhook():
         # تبدیل به lowercase و حذف @botname
         text = text.split("@")[0].lower()
 
-        # ارسال دستور /status
+        # ارسال دستور /status 
         if text == "/status":
-    status_data = {
-        "uptime": str(datetime.now() - start_time),
-        "current_position": current_position,
-        "entry_price": entry_price,
-        "position_size": position_size,
-        "trailing_active": trailing_active,
-        "trailing_price": trailing_price
-    }
+            status_data = {
+                "uptime": str(datetime.now() - start_time),
+                "current_position": current_position,
+                "entry_price": entry_price,
+                "position_size": position_size,
+                "trailing_active": trailing_active,
+                "trailing_price": trailing_price
+            }
 
-    send_telegram(
-        f"وضعیت ربات:\n"
-        f"Uptime: {status_data['uptime']}\n"
-        f"پوزیشن فعلی: {status_data['current_position']}\n"
-        f"قیمت ورود: {status_data['entry_price']}\n"
-        f"سایز پوزیشن: {status_data['position_size']}\n"
-        f"تریلینگ فعال: {status_data['trailing_active']}\n"
-        f"قیمت تریلینگ: {status_data['trailing_price']}"
-    )
-
+            send_telegram(
+                f"وضعیت ربات:\n"
+                f"Uptime: {status_data['uptime']}\n"
+                f"پوزیشن فعلی: {status_data['current_position']}\n"
+                f"قیمت ورود: {status_data['entry_price']}\n"
+                f"سایز پوزیشن: {status_data['position_size']}\n"
+                f"تریلینگ فعال: {status_data['trailing_active']}\n"
+                f"قیمت تریلینگ: {status_data['trailing_price']}"
+           )
 
         elif text == "/kill":
             kill_bot()
