@@ -373,7 +373,7 @@ HEARTBEAT_INTERVAL = 60 * 10 # 10 minutes
 #   FLASK APP SETUP
 # ===========================
 app = Flask(__name__)
-
+start_time = datetime.now()
 # ===========================
 #   BOT MAIN LOOP
 # ===========================
