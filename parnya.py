@@ -465,7 +465,7 @@ def telegram_webhook():
         text = text.split("@")[0].lower()
 
         # ارسال دستور /status 
-        if text == "/status":
+        if text.startswith("/status"):
             status_data = {
                 "uptime": str(datetime.now() - start_time),
                 "current_position": current_position,
@@ -485,11 +485,11 @@ def telegram_webhook():
                 f"قیمت تریلینگ: {status_data['trailing_price']}"
            )
 
-        elif text == "/kill":
+        elif text.startswith("/kill"):
             kill_bot()
             send_telegram("ربات متوقف شد.")
 
-        elif text == "/start":
+        elif text.startswith("/start"):
             start_bot()
             send_telegram("ربات شروع به کار کرد.")
 
