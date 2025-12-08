@@ -17,25 +17,6 @@ TIMEFRAME = "15min"
 # ===========================
 def get_klines():
     try:
-# ===========================
-#   FUTURES PRO+ BOT — Version 2
-#   Improved EMA + MACD (REAL)
-# ===========================
-
-import os
-import time
-import requests
-import numpy as np
-from datetime import datetime
-
-PAIR = "BTCUSDT"
-TIMEFRAME = "15min"
-
-# ===========================
-#   FETCH KLINES (SPOT)
-# ===========================
-def get_klines():
-    try:
         url = f"https://api.coinex.com/v1/market/kline?market={PAIR}&type={TIMEFRAME}&limit=120"
         r = requests.get(url, timeout=5).json()
         data = r["data"]["kline"]
