@@ -331,4 +331,7 @@ def pos():
 # MAIN
 # ----------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    from waitress import serve
+    port = int(os.environ.get("PORT", 10000))
+    serve(app, host="0.0.0.0", port=port)
+
