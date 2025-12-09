@@ -339,3 +339,18 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     serve(app, host="0.0.0.0", port=port)
 
+# ────────────── تست اتصال CoinEx (پایان فایل) ──────────────
+import requests
+
+def test_coinex_connection():
+    try:
+        res = requests.get("https://api.coinex.com/perpetual/v1/market/index", params={"market": "BTCUSDT"})
+        data = res.json()
+        if data.get("code") == 0:
+            print("\033[94m✅ CoinEx connection OK — Market:", data["data"]["market"], "\033[0m")
+        else:
+            print("\033[91m❌ CoinEx error:", data, "\033[0m")
+    except Exception as e:
+        print("\033[91m⚠️ CoinEx connection failed:", e, "\033[0m")
+
+test_coinex_connection()
