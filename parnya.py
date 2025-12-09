@@ -326,6 +326,10 @@ def close():
 @app.route("/positions")
 def pos():
     return jsonify(get_positions())
+    
+@app.route("/")
+def home():
+    return "✅ CoinEx FUTURES BOT is running. Endpoints: /status, /start, /kill, /close, /positions"
 
 # ----------------------------------------------------------
 # MAIN
