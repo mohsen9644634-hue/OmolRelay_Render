@@ -239,6 +239,16 @@ def status():
 ############################################################
 if __name__ == "__main__":
     print("🚀 Starting PARNYA Auto Futures BOT [LIVE STABLE MODE]")
+
+    from threading import Thread
+
+    # اجرای سرور Flask روی پورت مورد انتظار Render
+    def run_flask():
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
+    # اجرای همزمان Flask و حلقه‌ی اصلی ترید
+    Thread(target=run_flask).start()
+
     while True:
         candles = get_candles(SYMBOL)
         signal = super_signal(candles) if candles else None
