@@ -1,7 +1,7 @@
 ###########################################################
 #  PARNYA FUTURES AUTOTRADE BOT — FINAL LIVE STABLE        #
-#  Author: Mohsen (PRO+) | Engine by CoinEx Futures API     #
-############################################################
+#  Render-Optimized Version (No 404, No Dev Server)        #
+###########################################################
 
 import time, hmac, hashlib, requests, os, json
 from flask import Flask, jsonify
@@ -17,7 +17,7 @@ position = None
 entry_price = None
 
 ############################################################
-#                 API REQUEST HANDLER                      #
+#                 API REQUEST HANDLER                      
 ############################################################
 def sign_request(params):
     sorted_params = sorted(params.items())
@@ -49,7 +49,7 @@ def private_request(method, endpoint, params=None):
         return {}
 
 ############################################################
-#                 INDICATOR FUNCTIONS                      #
+#                 INDICATOR FUNCTIONS                      
 ############################################################
 def ema(values, period):
     k = 2 / (period + 1)
@@ -79,11 +79,11 @@ def macd(candles):
     ema26 = ema(closes, 26)
     macd_line = ema12 - ema26
     signal = ema([macd_line], 9)
-    hist_values = [macd_line - signal]
-    return macd_line, signal, hist_values
+    hist = macd_line - signal
+    return macd_line, signal, [hist]
 
 ############################################################
-#                 MARKET FUNCTIONS                         #
+#                 MARKET FUNCTIONS                         
 ############################################################
 def get_candles(symbol, period=900, limit=160):
     url = f"https://api.coinex.com/perpetual/v1/market/kline?market={symbol}&period={period}&limit={limit}"
@@ -112,7 +112,7 @@ def get_current_price(symbol):
         return None
 
 ############################################################
-#                 ORDER MANAGEMENT                         #
+#                 ORDER MANAGEMENT                         
 ############################################################
 def create_order(symbol, side, price, sl, tp):
     direction = "buy" if side == "LONG" else "sell"
@@ -135,7 +135,7 @@ def close_position(symbol):
     print(f"❌ [LIVE CLOSE] {symbol} | Result={r}")
 
 ############################################################
-#                 SIGNAL ENGINE                            #
+#                 SIGNAL ENGINE                            
 ############################################################
 def super_signal(candles):
     close_prices = [float(c[2]) for c in candles]
@@ -143,8 +143,10 @@ def super_signal(candles):
     ema50_ = ema(close_prices, 50)
     ema20_prev = ema(close_prices[:-1], 20)
     ema50_prev = ema(close_prices[:-1], 50)
+
     macd_line, macd_signal, hist_values = macd(candles)
-    hist = sum(hist_values[-3:]) / 3
+    hist = sum(hist_values) / len(hist_values)
+
     r = rsi(candles)
     a = atr(candles)
     last_close = close_prices[-1]
@@ -165,10 +167,11 @@ def super_signal(candles):
             return "LONG"
         if ema20_ < ema50_ and hist <= 0 and 30 < r < 55:
             return "SHORT"
+
     return None
 
 ############################################################
-#                 POSITION MANAGER                         #
+#                 POSITION MANAGER                         
 ############################################################
 def manage_positions(signal):
     global position, entry_price
@@ -176,31 +179,39 @@ def manage_positions(signal):
     if not candles:
         print("⚠️ No candle data. Skipping this cycle.")
         return
+
     atr_val = atr(candles)
+
     if position is None and signal in ["LONG", "SHORT"]:
         last_price = float(candles[-1][2])
         position = signal
         entry_price = last_price
+
         if signal == "LONG":
             sl = entry_price - 1.5 * atr_val
             tp = entry_price + 2.5 * atr_val
         else:
             sl = entry_price + 1.5 * atr_val
             tp = entry_price - 2.5 * atr_val
+
         create_order(SYMBOL, signal, entry_price, sl, tp)
+
     elif position is not None:
         current_price = get_current_price(SYMBOL)
         if current_price is None:
             print("⚠️ Price unavailable, skipping update.")
             return
+
         macd_line, macd_signal, hist_values = macd(candles)
-        hist_avg = sum(hist_values[-3:]) / 3
+        hist_avg = sum(hist_values) / len(hist_values)
+
         if position == "LONG":
             if current_price >= entry_price + 1.2 * atr_val:
                 update_stop_loss(SYMBOL, entry_price)
             if hist_avg < 0:
                 close_position(SYMBOL)
                 position = None
+
         elif position == "SHORT":
             if current_price <= entry_price - 1.2 * atr_val:
                 update_stop_loss(SYMBOL, entry_price)
@@ -209,17 +220,13 @@ def manage_positions(signal):
                 position = None
 
 ############################################################
-#                 CONNECTION TEST & WEB                    #
+#                        WEB SERVER                        
 ############################################################
-def test_coinex_connection():
-    try:
-        data = requests.get(f"https://api.coinex.com/perpetual/v1/market/ticker?market={SYMBOL}", timeout=10).json()
-        price = float(data["data"]["ticker"]["last"])
-        return {"connected": True, "market": SYMBOL, "price": price}
-    except Exception as e:
-        return {"connected": False, "error": str(e)}
-
 app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "OK"
 
 @app.route("/status")
 def status():
@@ -230,21 +237,30 @@ def status():
         "connection": test_coinex_connection()
     })
 
+def test_coinex_connection():
+    try:
+        data = requests.get(f"https://api.coinex.com/perpetual/v1/market/ticker?market={SYMBOL}", timeout=10).json()
+        price = float(data["data"]["ticker"]["last"])
+        return {"connected": True, "market": SYMBOL, "price": price}
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
 ############################################################
-#                        MAIN LOOP                         #
+#                        MAIN LOOP                         
 ############################################################
 if __name__ == "__main__":
     print("🚀 Starting PARNYA Auto Futures BOT [LIVE STABLE MODE]")
 
     from threading import Thread
 
-    def run_flask():
-        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    def trade_loop():
+        while True:
+            candles = get_candles(SYMBOL)
+            signal = super_signal(candles) if candles else None
+            manage_positions(signal)
+            time.sleep(15)
 
-    Thread(target=run_flask).start()
+    Thread(target=trade_loop).start()
 
-    while True:
-        candles = get_candles(SYMBOL)
-        signal = super_signal(candles) if candles else None
-        manage_positions(signal)
-        time.sleep(15)
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
