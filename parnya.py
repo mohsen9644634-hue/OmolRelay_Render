@@ -86,7 +86,7 @@ def macd(candles):
 #                 MARKET FUNCTIONS                         
 ############################################################
 def get_candles(symbol, period=900, limit=160):
-    url = f"https://api.coinex.com/perpetual/v1/market/kline?market={symbol}&period={period}&limit={limit}"
+    url = f"https://api.coinex.com/v1/market/kline?market={symbol}&type=5min&limit={limit}"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code != 200:
