@@ -86,31 +86,27 @@ def macd(candles):
 #                 MARKET FUNCTIONS                         #
 ############################################################
 def get_candles(symbol, period=900, limit=160):
-    url = f"{BASE_URL.replace('/perpetual','/v1')}/market/kline?market={symbol}&period={period}&limit={limit}"
+    url = f"https://api.coinex.com/perpetual/v1/market/kline?market={symbol}&period={period}&limit={limit}"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code != 200:
             print(f"⚠️ HTTP Error {r.status_code}: {r.text[:150]}")
             return []
         data = r.json()
-        if 'data' in data:
-            return data['data']
-        else:
-            print("⚠️ Unexpected JSON format:", data)
-            return []
+        return data.get("data", [])
     except Exception as e:
         print("❌ get_candles() request failed:", e)
         return []
 
 def get_current_price(symbol):
-    url = f"{BASE_URL.replace('/perpetual','/v1')}/market/ticker?market={symbol}"
+    url = f"https://api.coinex.com/perpetual/v1/market/ticker?market={symbol}"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code != 200:
             print(f"⚠️ Ticker Error {r.status_code}: {r.text[:100]}")
             return None
         data = r.json()
-        return float(data['data']['ticker']['last'])
+        return float(data["data"]["ticker"]["last"])
     except Exception as e:
         print("❌ get_current_price() failed:", e)
         return None
@@ -217,8 +213,8 @@ def manage_positions(signal):
 ############################################################
 def test_coinex_connection():
     try:
-        data = requests.get(f"{BASE_URL.replace('/perpetual','/v1')}/market/ticker?market={SYMBOL}", timeout=10).json()
-        price = float(data['data']['ticker']['last'])
+        data = requests.get(f"https://api.coinex.com/perpetual/v1/market/ticker?market={SYMBOL}", timeout=10).json()
+        price = float(data["data"]["ticker"]["last"])
         return {"connected": True, "market": SYMBOL, "price": price}
     except Exception as e:
         return {"connected": False, "error": str(e)}
@@ -231,7 +227,7 @@ def status():
         "running": True,
         "position": position,
         "entry_price": entry_price,
-        "connection": test_coinex_connction()
+        "connection": test_coinex_connection()
     })
 
 ############################################################
@@ -242,11 +238,9 @@ if __name__ == "__main__":
 
     from threading import Thread
 
-    # اجرای سرور Flask روی پورت مورد انتظار Render
     def run_flask():
         app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
 
-    # اجرای همزمان Flask و حلقه‌ی اصلی ترید
     Thread(target=run_flask).start()
 
     while True:
