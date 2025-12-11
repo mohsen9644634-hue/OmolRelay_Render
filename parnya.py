@@ -53,7 +53,7 @@ def get_price():
 # -----------------------------------------
 #   GET KLINES
 # -----------------------------------------
-def get_klines(tf="5m", limit=100):
+def get_klines(tf="5min", limit=100):
     try:
         r = requests.get(
             "https://api.coinex.com/v2/market/klines",
