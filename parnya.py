@@ -81,8 +81,8 @@ def analyze_trend(candles):
 # -----------------------------------------
 def fetch_mtf():
     try:
-        m5 = analyze_trend(get_klines("5m"))
-        m15 = analyze_trend(get_klines("15m"))
+        m5 = analyze_trend(get_klines("5min"))
+        m15 = analyze_trend(get_klines("15min"))
         h1 = analyze_trend(get_klines("1hour"))
         state["mtf"] = {"m5": m5, "m15": m15, "h1": h1}
         return m5, m15, h1
@@ -306,8 +306,8 @@ def home():
 @app.get("/test-tf")
 def test_tf():
     return jsonify({
-        "m5": analyze_trend(get_klines("5m")),
-        "m15": analyze_trend(get_klines("15m")),
+        "m5": analyze_trend(get_klines("5min")),
+        "m15": analyze_trend(get_klines("15min")),
         "h1": analyze_trend(get_klines("1hour"))
     })
 
