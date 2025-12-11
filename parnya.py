@@ -28,6 +28,7 @@ state = {
     "sl_levels": [],
     "breakeven": False,
     "trailing": False,
+    "peak": None,          # ADDED FOR PRO-TRAILING
     "mtf": {"m5": None, "m15": None, "h1": None},
     "confidence": 0,
 }
@@ -39,6 +40,21 @@ def sign(payload: dict):
     query = "&".join([f"{k}={v}" for k, v in payload.items()])
     signature = hmac.new(API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
     return signature
+
+# -----------------------------------------
+#   CONTRACT SIZE (ADDED)
+# -----------------------------------------
+def get_contract_size():
+    try:
+        r = requests.get("https://api.coinex.com/v2/futures/market/list", timeout=5).json()
+        for m in r["data"]:
+            if m["market"] == SYMBOL:
+                return float(m["contract_size"])
+    except:
+        pass
+    return 0.001   # default BTC
+
+CONTRACT_SIZE = get_contract_size()
 
 # -----------------------------------------
 #   GET PRICE
@@ -64,16 +80,16 @@ def get_balance():
         return 0
 
 # -----------------------------------------
-#   GET KLINES
+#   GET KLINES (FIXED)
 # -----------------------------------------
 def get_klines(tf="5min", limit=100):
     try:
         r = requests.get(
-            "https://api.coinex.com/v2/market/klines",
-            params={"market": SYMBOL, "period": tf, "limit": limit},
+            "https://api.coinex.com/v1/market/kline",
+            params={"market": SYMBOL, "type": tf, "limit": limit},
             timeout=7
         )
-        return r.json()["data"]["klines"]
+        return r.json().get("data", [])
     except:
         return []
 
@@ -85,10 +101,11 @@ def sma(data, length):
 def analyze_trend(candles):
     if not candles:
         return None
-    closes = [float(c["close"]) for c in candles]
+    closes = [float(c[2]) for c in candles]     # FIX because v1 returns array
     ma20 = sma(closes, 20)
     ma50 = sma(closes, 50)
-    if not ma20 or not ma50: return None
+    if not ma20 or not ma50:
+        return None
     return "up" if ma20 > ma50 else "down" if ma20 < ma50 else None
 
 # -----------------------------------------
@@ -147,9 +164,12 @@ def close_position(side, amount):
         return None
 
 # -----------------------------------------
-#   SET REAL SL/TP
+#   SET REAL SL/TP  (FIXED precision)
 # -----------------------------------------
 def set_sl_tp(pid, sl, tp):
+    sl = round(float(sl), 2)
+    tp = round(float(tp), 2)
+
     payload = {
         "market": SYMBOL,
         "position_id": pid,
@@ -158,21 +178,34 @@ def set_sl_tp(pid, sl, tp):
     }
     payload["timestamp"] = int(time.time()*1000)
     payload["signature"] = sign(payload)
+
     try:
         requests.post(f"{BASE_URL}/position/set-stop-loss-take-profit", data=payload, timeout=5)
     except:
         pass
 
 # -----------------------------------------
-#   GET POSITION
+#   GET POSITION (FIXED MAPPING)
 # -----------------------------------------
 def get_position():
     payload = {"market": SYMBOL}
     payload["timestamp"] = int(time.time()*1000)
     payload["signature"] = sign(payload)
+
     try:
-        data = requests.get(f"{BASE_URL}/position/list", params=payload, timeout=5).json()["data"]
-        return data[0] if len(data) else None
+        r = requests.get(f"{BASE_URL}/position/list", params=payload, timeout=5).json()
+        if not r["data"]:
+            return None
+        p = r["data"][0]
+
+        # NORMALIZE TO ORIGINAL KEYS
+        p["entry_price"] = float(p["avg_entry_price"])
+        p["side"] = p["side"]
+        p["amount"] = float(p["amount"])
+        p["position_id"] = p["position_id"]
+
+        return p
+
     except:
         return None
 
@@ -198,6 +231,7 @@ def compute_confidence():
         if tf == "down": score -= 1
     conf = abs(score)/3
     state["confidence"] = round(conf, 2)
+
     if score > 0: return "long", conf
     if score < 0: return "short", conf
     return None, 0
@@ -205,8 +239,9 @@ def compute_confidence():
 def required_confidence(m5, m15, h1):
     up = [m5, m15, h1].count("up")
     dn = [m5, m15, h1].count("down")
-    if up == 3 or dn == 3: return 0.50
-    if up == 2 or dn == 2: return 0.60
+
+    if up == 3 or dn == 3: return 0.60
+    if up == 2 or dn == 2: return 0.50
     return 0.75
 
 # -----------------------------------------
@@ -227,10 +262,12 @@ def trading_loop():
             pos = get_position()
             balance = get_balance()
 
+            # ----------------- NO POSITION -----------------
             if pos is None:
-                if direction and conf >= req*0.7:
+                if direction and conf >= req:
+
                     position_value = balance * POSITION_SIZE_PERCENT * LEVERAGE
-                    amount = round(position_value / price, 3)
+                    amount = round((position_value / price) / CONTRACT_SIZE, 3)
 
                     if direction == "long":
                         open_long(amount)
@@ -257,28 +294,36 @@ def trading_loop():
                     state["tp_level"] = 0
                     state["breakeven"] = False
                     state["trailing"] = False
+                    state["peak"] = entry  # INIT PEAK
 
                 time.sleep(3)
                 continue
 
+            # ----------------- HAVE POSITION -----------------
             entry = float(pos["entry_price"])
             amount = float(pos["amount"])
             pid = pos["position_id"]
 
+            # -----------------------------------------
+            #   REVERSAL ENTRY
+            # -----------------------------------------
             if state["position"] == "long" and direction=="short" and conf>=req:
                 close_position("sell", amount)
                 position_value = balance * POSITION_SIZE_PERCENT * LEVERAGE
-                open_short(round(position_value / price, 3))
+                open_short(round((position_value/price)/CONTRACT_SIZE,3))
                 time.sleep(2)
                 continue
 
             if state["position"] == "short" and direction=="long" and conf>=req:
                 close_position("buy", amount)
                 position_value = balance * POSITION_SIZE_PERCENT * LEVERAGE
-                open_long(round(position_value / price, 3))
+                open_long(round((position_value/price)/CONTRACT_SIZE,3))
                 time.sleep(2)
                 continue
 
+            # -----------------------------------------
+            #   TAKE PROFITS
+            # -----------------------------------------
             for i, step in enumerate(TP_STEPS):
                 if i < state.get("tp_level", 0):
                     continue
@@ -286,6 +331,7 @@ def trading_loop():
                 target = entry*(1+step["profit"]) if state["position"]=="long" else entry*(1-step["profit"])
 
                 if (state["position"]=="long" and price>=target) or (state["position"]=="short" and price<=target):
+
                     close_amount = amount * step["close"]
                     close_position("sell" if state["position"]=="long" else "buy", close_amount)
 
@@ -296,13 +342,24 @@ def trading_loop():
                         set_sl_tp(pid, be, pos["take_profit_price"])
                         state["breakeven"] = True
 
-                    if i == 0:
+                    if i == 0:   # start trailing
                         state["trailing"] = True
 
+            # -----------------------------------------
+            #   TRAILING STOP PRO (MODEL B)
+            # -----------------------------------------
             if state["trailing"]:
-                trail_dist = 0.004
-                new_sl = price*(1-trail_dist) if state["position"]=="long" else price*(1+trail_dist)
-                set_sl_tp(pid, new_sl, pos["take_profit_price"])
+                if state["position"] == "long":
+                    if price > state["peak"]:
+                        state["peak"] = price
+                        new_sl = price * (1 - 0.004)
+                        set_sl_tp(pid, new_sl, pos["take_profit_price"])
+
+                else:  # short
+                    if price < state["peak"]:
+                        state["peak"] = price
+                        new_sl = price * (1 + 0.004)
+                        set_sl_tp(pid, new_sl, pos["take_profit_price"])
 
             time.sleep(2)
 
@@ -316,6 +373,10 @@ def trading_loop():
 @app.get("/")
 def home():
     return jsonify(state)
+
+@app.get("/health")   # ADDED
+def health():
+    return "OK"
 
 @app.get("/test-tf")
 def test_tf():
