@@ -1,4 +1,5 @@
 import time
+import psutil
 import hmac
 import hashlib
 import requests
@@ -394,6 +395,38 @@ def force_close():
         close_position(side, pos["amount"])
         return "closed"
     return "no position"
+    
+@app.get("/status")
+def status():
+    # وضعیت حلقه معامله‌گری
+    loop_state = "active" if state.get("loop_running", False) else "stopped"
+
+    # وضعیت پوزیشن فعلی
+    try:
+        pos = get_position()
+        if pos:
+            position_info = {
+                "side": pos.get("side"),
+                "amount": pos.get("amount"),
+                "entry_price": pos.get("entry_price"),
+                "unrealized_pnl": pos.get("unrealized_pnl")
+            }
+        else:
+            position_info = None
+    except Exception as e:
+        position_info = f"error: {str(e)}"
+
+    # خروجی اصلی
+    return jsonify({
+        "status": "Running",
+        "service": "CoinEx Futures Bot",
+        "mode": "production",
+        "loop": loop_state,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "position": position_info,
+        "cpu_load": psutil.cpu_percent(interval=0.1),
+        "memory_usage": psutil.virtual_memory().percent
+    })
 
 # -----------------------------------------
 #   START BOT
