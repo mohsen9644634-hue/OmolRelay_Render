@@ -7,7 +7,7 @@ from flask import Flask, jsonify, request
 
 # -----------------------------------------
 #   FUTURES REAL MODE SETTINGS
-# -----------------------------------------
+# ----------------------------------------
 API_KEY = "YOUR_KEY"
 API_SECRET = "YOUR_SECRET"
 BASE_URL = "https://api.coinex.com/v2/futures"
