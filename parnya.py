@@ -1,4 +1,4 @@
-import time
+بهimport time
 import hmac
 import hashlib
 import requests
@@ -56,7 +56,7 @@ def get_price():
 def get_klines(tf="5m", limit=100):
     try:
         r = requests.get(
-            "https://api.coinex.com/v1/market/kline",
+            "https://api.coinex.com/v2/market/klines",
             params={"market": SYMBOL, "period": tf, "limit": limit},
             timeout=7
         )
