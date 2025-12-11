@@ -13,8 +13,8 @@ API_SECRET = "YOUR_SECRET"
 BASE_URL = "https://api.coinex.com/v2/futures"
 
 SYMBOL = "BTCUSDT"
-LEVERAGE = 20
-POSITION_SIZE_USDT = 50
+LEVERAGE = 10
+POSITION_SIZE_PERCENT = 0.80
 
 # -----------------------------------------
 #   FLASK APP
@@ -51,6 +51,19 @@ def get_price():
         return None
 
 # -----------------------------------------
+#   GET BALANCE
+# -----------------------------------------
+def get_balance():
+    payload = {"asset": "USDT"}
+    payload["timestamp"] = int(time.time()*1000)
+    payload["signature"] = sign(payload)
+    try:
+        r = requests.get(f"{BASE_URL}/asset/query", params=payload, timeout=5).json()
+        return float(r["data"]["available"])
+    except:
+        return 0
+
+# -----------------------------------------
 #   GET KLINES
 # -----------------------------------------
 def get_klines(tf="5min", limit=100):
@@ -60,7 +73,7 @@ def get_klines(tf="5min", limit=100):
             params={"market": SYMBOL, "period": tf, "limit": limit},
             timeout=7
         )
-        return r.json()["data"]
+        return r.json()["data"]["klines"]
     except:
         return []
 
@@ -70,6 +83,8 @@ def sma(data, length):
     return sum(data[-length:]) / length
 
 def analyze_trend(candles):
+    if not candles:
+        return None
     closes = [float(c["close"]) for c in candles]
     ma20 = sma(closes, 20)
     ma50 = sma(closes, 50)
@@ -160,16 +175,17 @@ def get_position():
         return data[0] if len(data) else None
     except:
         return None
+
 # -----------------------------------------
 #   MULTI TP / SL CONFIG
 # -----------------------------------------
 TP_STEPS = [
-    {"profit": 0.004, "close": 0.40},  # TP1
-    {"profit": 0.008, "close": 0.30},  # TP2
-    {"profit": 0.012, "close": 0.30},  # TP3
+    {"profit": 0.004, "close": 0.40},
+    {"profit": 0.008, "close": 0.30},
+    {"profit": 0.012, "close": 0.30},
 ]
 
-SL_LEVEL = 0.006  # SL پایه
+SL_LEVEL = 0.006
 
 # -----------------------------------------
 #   CONFIDENCE
@@ -209,11 +225,12 @@ def trading_loop():
 
             price = get_price()
             pos = get_position()
+            balance = get_balance()
 
-            # --------------------------------- NO POSITION
             if pos is None:
                 if direction and conf >= req*0.7:
-                    amount = POSITION_SIZE_USDT / price
+                    position_value = balance * POSITION_SIZE_PERCENT * LEVERAGE
+                    amount = round(position_value / price, 3)
 
                     if direction == "long":
                         open_long(amount)
@@ -244,25 +261,24 @@ def trading_loop():
                 time.sleep(3)
                 continue
 
-            # --------------------------------- POSITION ALREADY OPEN
             entry = float(pos["entry_price"])
             amount = float(pos["amount"])
             pid = pos["position_id"]
 
-            # ---------- REVERSE SIGNAL
             if state["position"] == "long" and direction=="short" and conf>=req:
                 close_position("sell", amount)
-                open_short(POSITION_SIZE_USDT/price)
+                position_value = balance * POSITION_SIZE_PERCENT * LEVERAGE
+                open_short(round(position_value / price, 3))
                 time.sleep(2)
                 continue
 
             if state["position"] == "short" and direction=="long" and conf>=req:
                 close_position("buy", amount)
-                open_long(POSITION_SIZE_USDT/price)
+                position_value = balance * POSITION_SIZE_PERCENT * LEVERAGE
+                open_long(round(position_value / price, 3))
                 time.sleep(2)
                 continue
 
-            # ---------- MULTI TP
             for i, step in enumerate(TP_STEPS):
                 if i < state.get("tp_level", 0):
                     continue
@@ -275,17 +291,14 @@ def trading_loop():
 
                     state["tp_level"] = i+1
 
-                    # ---------- BREAKEVEN
                     if not state["breakeven"]:
                         be = entry
                         set_sl_tp(pid, be, pos["take_profit_price"])
                         state["breakeven"] = True
 
-                    # ---------- TRAILING
                     if i == 0:
                         state["trailing"] = True
 
-            # ---------- TRAILING STOP
             if state["trailing"]:
                 trail_dist = 0.004
                 new_sl = price*(1-trail_dist) if state["position"]=="long" else price*(1+trail_dist)
@@ -296,6 +309,7 @@ def trading_loop():
         except Exception as e:
             print("ERR:", e)
             time.sleep(4)
+
 # -----------------------------------------
 #   ROUTES
 # -----------------------------------------
