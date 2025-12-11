@@ -62,80 +62,7 @@ def get_price():
 def get_klines(timeframe="5m", limit=100):
     try:
         r = requests.get(
-            "https://api.coinex.com/v1/market/kline",   # FIX 1
-            params={"market": SYMBOL, "period": timeframe, "limit": limit},
-            timeout=7
-        )
-        return r.json()["data"]
-    except:
-        return []
-
-# -----------------------------------------
-import time
-import hmac
-import hashlib
-import requests
-import threading
-from flask import Flask, jsonify, request
-
-# -----------------------------------------
-#   FUTURES REAL MODE SETTINGS
-# -----------------------------------------
-API_KEY = "YOUR_KEY"
-API_SECRET = "YOUR_SECRET"
-BASE_URL = "https://api.coinex.com/v2/futures"
-
-SYMBOL = "BTCUSDT"
-LEVERAGE = 20
-POSITION_SIZE_USDT = 50   # مقدار پوزیشن
-
-# -----------------------------------------
-#  FLASK APP + SHARED STATE
-# -----------------------------------------
-app = Flask(__name__)
-
-state = {
-    "position": None,
-    "entry_price": None,
-    "sl": None,
-    "tp": None,
-    "confidence": 0,
-    "status": "idle",
-    "last_signal": None,
-    "mtf": {"m5": None, "m15": None, "h1": None}
-}
-
-# -----------------------------------------
-#   AUTH SIGNING FOR FUTURES
-# -----------------------------------------
-def sign(payload: dict):
-    query = "&".join([f"{k}={v}" for k, v in payload.items()])
-    signature = hmac.new(
-        API_SECRET.encode(),
-        query.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    return signature
-
-# -----------------------------------------
-#  BASIC FUTURES GET PRICE
-# -----------------------------------------
-def get_price():
-    try:
-        url = f"{BASE_URL}/market/ticker"
-        r = requests.get(url, params={"market": SYMBOL}, timeout=5)
-        p = r.json()["data"]["ticker"]["last"]
-        return float(p)
-    except:
-        return None
-
-# -----------------------------------------
-#  FETCH CANDLES  (FIXED)
-# -----------------------------------------
-def get_klines(timeframe="5m", limit=100):
-    try:
-        r = requests.get(
-            "https://api.coinex.com/v1/market/kline",   # FIX 1
+            "https://api.coinex.com/v1/market/kline",
             params={"market": SYMBOL, "period": timeframe, "limit": limit},
             timeout=7
         )
@@ -172,14 +99,13 @@ def fetch_mtf():
     try:
         m5 = analyze_trend(get_klines("5m"))
         m15 = analyze_trend(get_klines("15m"))
-        h1 = analyze_trend(get_klines("1hour"))   # FIX 2
+        h1 = analyze_trend(get_klines("1hour"))
 
         state["mtf"] = {"m5": m5, "m15": m15, "h1": h1}
         return m5, m15, h1
     except:
         return None, None, None
-
-# -----------------------------------------
+        # -----------------------------------------
 #   SET LEVERAGE (REAL FUTURES)
 # -----------------------------------------
 def set_leverage():
@@ -259,7 +185,6 @@ def close_position(side, amount):
 #   SET REAL STOP LOSS & TAKE PROFIT
 # -----------------------------------------
 def set_sl_tp(position_id, sl_price, tp_price):
-
     payload = {
         "market": SYMBOL,
         "position_id": position_id,
@@ -326,7 +251,6 @@ def required_confidence(m5, m15, h1):
         return 0.60
 
     return 0.75
-
 # -----------------------------------------
 #  MAIN EXECUTION LOGIC
 # -----------------------------------------
@@ -343,11 +267,8 @@ def trading_loop():
             price = get_price()
             pos = get_position()
 
-            # -------------------------------------
-            #  NO POSITION → check entry
-            # -------------------------------------
             if pos is None:
-                if direction and conf >= (req_conf * 0.7):   # FIX 3
+                if direction and conf >= (req_conf * 0.7):
                     amount = POSITION_SIZE_USDT / price
 
                     if direction == "long":
@@ -371,9 +292,6 @@ def trading_loop():
                 time.sleep(3)
                 continue
 
-            # -------------------------------------
-            #  HAVE POSITION → manage + reverse
-            # -------------------------------------
             entry = float(pos["entry_price"])
             amount = float(pos["amount"])
             pid = pos["position_id"]
