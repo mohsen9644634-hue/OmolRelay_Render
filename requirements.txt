@@ -1,6 +1,5 @@
 flask
 requests
+gunicorn
 numpy
 pandas
-gunicorn
-waitress
