@@ -226,16 +226,34 @@ SL_LEVEL = 0.006
 # -----------------------------------------
 def compute_confidence():
     m5, m15, h1 = fetch_mtf()
-    score = 0
-    for tf in [m5, m15, h1]:
-        if tf == "up": score += 1
-        if tf == "down": score -= 1
-    conf = abs(score)/3
-    state["confidence"] = round(conf, 2)
+    
+    current_direction = None
+    current_confidence = 0.0 # Default confidence when no signal or bias is set
 
-    if score > 0: return "long", conf
-    if score < 0: return "short", conf
-    return None, 0
+    if h1 is None:
+        state["confidence"] = round(current_confidence, 2)
+        return current_direction, current_confidence
+
+    # H1 acts as the primary BIAS filter
+    if h1 == "up":
+        # If H1 is 'up', look for 'long' triggers from M15 and M5
+        if m15 == "up" and m5 == "up":
+            current_direction = "long"
+            current_confidence = 0.8 # High confidence for a clear trigger
+    elif h1 == "down":
+        # If H1 is 'down', look for 'short' triggers from M15 and M5
+        if m15 == "down" and m5 == "down":
+            current_direction = "short"
+            current_confidence = 0.8 # High confidence for a clear trigger
+
+    # Update the global state with the calculated confidence
+    state["confidence"] = round(current_confidence, 2)
+    return current_direction, current_confidence
+
+# =================================================================
+# End of compute_confidence() replacement
+# =================================================================
+
 
 def required_confidence(m5, m15, h1):
     up = [m5, m15, h1].count("up")
