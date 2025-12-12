@@ -108,8 +108,7 @@ def fetch_mtf():
 # =================================================
 # SIGNAL LOGIC
 # =================================================
-def compute_confidence():
-    m5, m15, h1 = fetch_mtf()
+def compute_confidence(m5, m15, h1):  # FIXED: no duplicate fetch
     direction = None
     confidence = 0.0
 
@@ -174,33 +173,29 @@ def open_order(side, amount):
     return requests.post(f"{BASE_URL}/order/put", data=payload).json()
 
 
-def close_order(side, amount):
-    return open_order(side, amount)
-
-
 def get_position():
     payload = {"market": SYMBOL, "timestamp": int(time.time() * 1000)}
     payload["signature"] = sign(payload)
     try:
         r = requests.get(f"{BASE_URL}/position/list", params=payload).json()
-        if not r["data"]:
-            return None
-        p = r["data"][0]
-        return {
-            "side": p["side"],
-            "amount": float(p["amount"]),
-            "entry": float(p["avg_entry_price"]),
-            "pid": p["position_id"],
-        }
+        for p in r.get("data", []):  # FIXED: safe check
+            if float(p["amount"]) != 0:
+                return {
+                    "side": p["side"],
+                    "amount": float(p["amount"]),
+                    "entry": float(p["avg_entry_price"]),
+                    "pid": p["position_id"],
+                }
+        return None
     except:
         return None
 
 
-def set_sl(pid, price):
+def set_sl(pid, entry, side):  # FIXED
     payload = {
         "market": SYMBOL,
         "position_id": pid,
-        "stop_loss_price": round(price, 2),
+        "stop_loss_price": round(entry, 2),
         "timestamp": int(time.time() * 1000),
     }
     payload["signature"] = sign(payload)
@@ -224,11 +219,11 @@ def manage_trade(price, pos):
         return
 
     close_amt = round(pos["amount"] * plan[i]["close"], 3)
-    close_order("sell" if side == "buy" else "buy", close_amt)
+    open_order("sell" if side == "buy" else "buy", close_amt)
     state["trade"]["tp_index"] += 1
 
     if i == 0:
-        set_sl(pos["pid"], entry)
+        set_sl(pos["pid"], entry, side)  # FIXED: BE correctly
 
 # =================================================
 # MAIN LOOP
@@ -245,30 +240,41 @@ def trading_loop():
             pos = get_position()
             balance = get_balance()
 
+            # RESET STATE AFTER FULL CLOSE
+            if not pos and state["trade"]["type"]:
+                state["trade"] = {"type": None, "tp_index": 0}  # FIXED
+
             m5, m15, h1 = fetch_mtf()
-            direction, conf = compute_confidence()
+            direction, conf = compute_confidence(m5, m15, h1)
+
+            entered = False  # FIXED: prevent double entry
 
             # SNAP ENTRY
             snap_dir = snap_signal(m15, h1)
-            if not pos and snap_dir:
+            if not pos and snap_dir and not entered:
                 value = balance * POSITION_SIZE_PERCENT * LEVERAGE * 0.5
                 amount = round(value / price, 3)
                 open_order("buy" if snap_dir == "long" else "sell", amount)
 
+                pos = get_position()
+                if pos:
+                    sl = pos["entry"] * (1 - SL_SNAP) if pos["side"] == "buy" else pos["entry"] * (1 + SL_SNAP)
+                    set_sl(pos["pid"], sl, pos["side"])  # FIXED
+
                 state["trade"] = {"type": "snap", "tp_index": 0}
-                if snap_dir == "long":
-                    state["snap"]["long_used"] = True
-                else:
-                    state["snap"]["short_used"] = True
+                state["snap"]["long_used"] |= snap_dir == "long"
+                state["snap"]["short_used"] |= snap_dir == "short"
+                entered = True
 
             # CORE ENTRY
-            if not pos and direction and conf >= 0.8:
+            if not pos and direction and conf >= 0.8 and not entered:
                 value = balance * POSITION_SIZE_PERCENT * LEVERAGE
                 amount = round(value / price, 3)
                 open_order("buy" if direction == "long" else "sell", amount)
                 state["trade"] = {"type": "core", "tp_index": 0}
 
-            # MANAGE TP
+            # MANAGE TRADE
+            pos = get_position()
             if pos:
                 manage_trade(price, pos)
 
@@ -296,7 +302,6 @@ def status():
 @app.get("/health")
 def health():
     return "OK"
-
 
 # =================================================
 # START
