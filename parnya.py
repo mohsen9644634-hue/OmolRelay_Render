@@ -250,6 +250,7 @@ def required_confidence(m5, m15, h1):
 # -----------------------------------------
 def trading_loop():
     print("BOT STARTED")
+    state["loop_running"] = True
 
     while True:
         try:
