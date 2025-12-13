@@ -317,6 +317,34 @@ def status():
 @app.get("/health")
 def health():
     return "OK"
+# ================= SIGNAL OUTPUT (ADD TO END OF FILE) =================
+
+@app.route("/signal", methods=["GET"])
+def signal_output():
+    try:
+        pos = get_position()
+
+        # اگر پوزیشن فعال داریم
+        if pos:
+            return {
+                "signal": "ACTIVE",
+                "type": "LONG" if pos["side"] == "long" else "SHORT",
+                "entry": round(pos["entry"], 2),
+                "size": pos["size"],
+                "time": time.strftime("%Y-%m-%d %H:%M")
+            }
+
+        # اگر پوزیشن نداریم
+        return {
+            "signal": "NO ACTIVE TRADE",
+            "time": time.strftime("%Y-%m-%d %H:%M")
+        }
+
+    except Exception as e:
+        return {
+            "signal": "ERROR",
+            "message": str(e)
+        }
 
 # =================================================
 # START
