@@ -12,6 +12,7 @@ from flask import Flask, jsonify
 API_KEY = "YOUR_KEY"
 API_SECRET = "YOUR_SECRET"
 BASE_URL = "https://api.coinex.com/v2/futures"
+SPOT_URL = "https://api.coinex.com/v1/market"
 
 SYMBOL = "BTCUSDT"
 LEVERAGE = 10
@@ -28,15 +29,8 @@ state = {
     "entry_price": None,
     "confidence": 0.0,
     "mtf": {"m5": None, "m15": None, "h1": None},
-    "trade": {
-        "type": None,  # core / snap
-        "tp_index": 0
-    },
-    "snap": {
-        "long_used": False,
-        "short_used": False,
-        "last_reset_day": None
-    }
+    "trade": {"type": None, "tp_index": 0},
+    "snap": {"long_used": False, "short_used": False, "last_reset_day": None}
 }
 
 # =================================================
@@ -74,13 +68,31 @@ def get_balance():
 def get_klines(tf, limit=100):
     try:
         r = requests.get(
-            "https://api.coinex.com/v1/market/kline",
+            f"{SPOT_URL}/kline",
             params={"market": SYMBOL, "type": tf, "limit": limit},
             timeout=5
         ).json()
         return r.get("data", [])
     except:
         return []
+
+
+def price_sync_ok():
+    """✅ FUTURES vs SPOT safety check"""
+    try:
+        spot = requests.get(
+            f"{SPOT_URL}/ticker",
+            params={"market": SYMBOL},
+            timeout=5
+        ).json()
+        spot_price = float(spot["data"]["ticker"]["last"])
+        fut_price = get_price()
+        if not fut_price:
+            return False
+        diff = abs(spot_price - fut_price) / fut_price
+        return diff < 0.001  # 0.1%
+    except:
+        return False
 
 
 def sma(arr, n):
@@ -106,19 +118,23 @@ def fetch_mtf():
     return state["mtf"]["m5"], state["mtf"]["m15"], state["mtf"]["h1"]
 
 # =================================================
-# SIGNAL LOGIC
+# SIGNAL LOGIC (FIXED confidence)
 # =================================================
-def compute_confidence(m5, m15, h1):  # FIXED: no duplicate fetch
-    direction = None
-    confidence = 0.0
+def compute_confidence(m5, m15, h1):
+    score = 0
+    if m5 and m5 == m15:
+        score += 1
+    if m15 and m15 == h1:
+        score += 1
+    if m5 and m5 == h1:
+        score += 1
 
-    if h1 == "up" and m15 == "up" and m5 == "up":
-        direction = "long"
-        confidence = 0.8
-
-    elif h1 == "down" and m15 == "down" and m5 == "down":
-        direction = "short"
-        confidence = 0.8
+    if score >= 2:
+        direction = "long" if h1 == "up" else "short"
+        confidence = 0.65 if score == 2 else 0.85
+    else:
+        direction = None
+        confidence = 0.0
 
     state["confidence"] = confidence
     return direction, confidence
@@ -149,7 +165,6 @@ TP_CORE = [
     {"p": 0.008, "close": 0.3},
     {"p": 0.012, "close": 0.3},
 ]
-
 TP_SNAP = [
     {"p": 0.003, "close": 0.5},
     {"p": 0.006, "close": 0.5},
@@ -178,7 +193,7 @@ def get_position():
     payload["signature"] = sign(payload)
     try:
         r = requests.get(f"{BASE_URL}/position/list", params=payload).json()
-        for p in r.get("data", []):  # FIXED: safe check
+        for p in r.get("data", []):
             if float(p["amount"]) != 0:
                 return {
                     "side": p["side"],
@@ -191,11 +206,11 @@ def get_position():
         return None
 
 
-def set_sl(pid, entry, side):  # FIXED
+def set_sl(pid, sl_price):
     payload = {
         "market": SYMBOL,
         "position_id": pid,
-        "stop_loss_price": round(entry, 2),
+        "stop_loss_price": round(sl_price, 2),
         "timestamp": int(time.time() * 1000),
     }
     payload["signature"] = sign(payload)
@@ -223,7 +238,7 @@ def manage_trade(price, pos):
     state["trade"]["tp_index"] += 1
 
     if i == 0:
-        set_sl(pos["pid"], entry, side)  # FIXED: BE correctly
+        set_sl(pos["pid"], entry)  # ✅ BE واقعی
 
 # =================================================
 # MAIN LOOP
@@ -236,20 +251,22 @@ def trading_loop():
         try:
             reset_snap_daily()
 
+            if not price_sync_ok():
+                time.sleep(3)
+                continue
+
             price = get_price()
             pos = get_position()
             balance = get_balance()
 
-            # RESET STATE AFTER FULL CLOSE
             if not pos and state["trade"]["type"]:
-                state["trade"] = {"type": None, "tp_index": 0}  # FIXED
+                state["trade"] = {"type": None, "tp_index": 0}
 
             m5, m15, h1 = fetch_mtf()
             direction, conf = compute_confidence(m5, m15, h1)
 
-            entered = False  # FIXED: prevent double entry
+            entered = False
 
-            # SNAP ENTRY
             snap_dir = snap_signal(m15, h1)
             if not pos and snap_dir and not entered:
                 value = balance * POSITION_SIZE_PERCENT * LEVERAGE * 0.5
@@ -259,21 +276,19 @@ def trading_loop():
                 pos = get_position()
                 if pos:
                     sl = pos["entry"] * (1 - SL_SNAP) if pos["side"] == "buy" else pos["entry"] * (1 + SL_SNAP)
-                    set_sl(pos["pid"], sl, pos["side"])  # FIXED
+                    set_sl(pos["pid"], sl)
 
                 state["trade"] = {"type": "snap", "tp_index": 0}
                 state["snap"]["long_used"] |= snap_dir == "long"
                 state["snap"]["short_used"] |= snap_dir == "short"
                 entered = True
 
-            # CORE ENTRY
-            if not pos and direction and conf >= 0.8 and not entered:
+            if not pos and direction and conf >= 0.65 and not entered:
                 value = balance * POSITION_SIZE_PERCENT * LEVERAGE
                 amount = round(value / price, 3)
                 open_order("buy" if direction == "long" else "sell", amount)
                 state["trade"] = {"type": "core", "tp_index": 0}
 
-            # MANAGE TRADE
             pos = get_position()
             if pos:
                 manage_trade(price, pos)
