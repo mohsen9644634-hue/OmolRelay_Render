@@ -1,16 +1,14 @@
-import time
-import hmac
-import hashlib
-import threading
-import requests
-import psutil
+import time, hmac, hashlib, threading, requests, psutil, os
 from flask import Flask, jsonify
 
 # =================================================
 # CONFIG
 # =================================================
-API_KEY = "YOUR_KEY"
-API_SECRET = "YOUR_SECRET"
+API_KEY = os.getenv("COINEX_API_KEY")
+API_SECRET = os.getenv("COINEX_API_SECRET")
+if not API_KEY or not API_SECRET:
+    raise RuntimeError("COINEX_API_KEY / COINEX_API_SECRET not set")
+
 BASE_URL = "https://api.coinex.com/v2/futures"
 SPOT_URL = "https://api.coinex.com/v1/market"
 
@@ -28,7 +26,7 @@ state = {
     "position": None,
     "entry_price": None,
     "confidence": 0.0,
-    "mtf": {"m5": None, "m15": None, "h1": None},
+    "mtf": {"m15": None, "h1": None},
     "trade": {"type": None, "tp_index": 0},
     "snap": {"long_used": False, "short_used": False, "last_reset_day": None}
 }
@@ -36,117 +34,92 @@ state = {
 # =================================================
 # AUTH
 # =================================================
-def sign(payload: dict):
-    query = "&".join(f"{k}={v}" for k, v in payload.items())
-    return hmac.new(API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
+def sign(p):
+    q = "&".join(f"{k}={v}" for k, v in p.items())
+    return hmac.new(API_SECRET.encode(), q.encode(), hashlib.sha256).hexdigest()
 
 # =================================================
-# MARKET DATA
+# BASIC API
 # =================================================
+def set_leverage():
+    p = {
+        "market": SYMBOL,
+        "leverage": LEVERAGE,
+        "timestamp": int(time.time() * 1000)
+    }
+    p["signature"] = sign(p)
+    requests.post(f"{BASE_URL}/position/adjust-leverage", data=p)
+
 def get_price():
-    try:
-        r = requests.get(
-            f"{BASE_URL}/market/ticker",
-            params={"market": SYMBOL},
-            timeout=5
-        ).json()
-        return float(r["data"]["ticker"]["last"])
-    except:
-        return None
-
+    r = requests.get(f"{BASE_URL}/market/ticker", params={"market": SYMBOL}).json()
+    return float(r["data"]["ticker"]["last"])
 
 def get_balance():
-    try:
-        payload = {"asset": "USDT", "timestamp": int(time.time() * 1000)}
-        payload["signature"] = sign(payload)
-        r = requests.get(f"{BASE_URL}/asset/query", params=payload, timeout=5).json()
-        return float(r["data"]["available"])
-    except:
-        return 0.0
+    p = {"asset": "USDT", "timestamp": int(time.time() * 1000)}
+    p["signature"] = sign(p)
+    r = requests.get(f"{BASE_URL}/asset/query", params=p).json()
+    return float(r["data"]["available"])
 
-
-def get_klines(tf, limit=100):
-    try:
-        r = requests.get(
-            f"{SPOT_URL}/kline",
-            params={"market": SYMBOL, "type": tf, "limit": limit},
-            timeout=5
-        ).json()
-        return r.get("data", [])
-    except:
-        return []
-
-
-def price_sync_ok():
-    """✅ FUTURES vs SPOT safety check"""
-    try:
-        spot = requests.get(
-            f"{SPOT_URL}/ticker",
-            params={"market": SYMBOL},
-            timeout=5
-        ).json()
-        spot_price = float(spot["data"]["ticker"]["last"])
-        fut_price = get_price()
-        if not fut_price:
-            return False
-        diff = abs(spot_price - fut_price) / fut_price
-        return diff < 0.001  # 0.1%
-    except:
-        return False
-
-
-def sma(arr, n):
-    if len(arr) < n:
-        return None
-    return sum(arr[-n:]) / n
-
-
-def analyze_trend(tf):
-    data = get_klines(tf)
-    closes = [float(c[2]) for c in data]
-    ma20 = sma(closes, 20)
-    ma50 = sma(closes, 50)
-    if ma20 is None or ma50 is None:
-        return None
-    return "up" if ma20 > ma50 else "down"
-
-
-def fetch_mtf():
-    state["mtf"]["m5"] = analyze_trend("5min")
-    state["mtf"]["m15"] = analyze_trend("15min")
-    state["mtf"]["h1"] = analyze_trend("1hour")
-    return state["mtf"]["m5"], state["mtf"]["m15"], state["mtf"]["h1"]
+def get_klines(tf, limit=200):
+    r = requests.get(
+        f"{SPOT_URL}/kline",
+        params={"market": SYMBOL, "type": tf, "limit": limit}
+    ).json()
+    return [float(c[2]) for c in r.get("data", [])]
 
 # =================================================
-# SIGNAL LOGIC (FIXED confidence)
+# INDICATORS (NEW STRATEGY)
 # =================================================
-def compute_confidence(m5, m15, h1):
-    score = 0
-    if m5 and m5 == m15:
-        score += 1
-    if m15 and m15 == h1:
-        score += 1
-    if m5 and m5 == h1:
-        score += 1
+def ema(data, n):
+    k = 2 / (n + 1)
+    e = data[0]
+    for v in data[1:]:
+        e = v * k + e * (1 - k)
+    return e
 
-    if score >= 2:
-        direction = "long" if h1 == "up" else "short"
-        confidence = 0.65 if score == 2 else 0.85
-    else:
-        direction = None
-        confidence = 0.0
+def rsi(data, n=14):
+    g = l = 0
+    for i in range(-n, 0):
+        d = data[i] - data[i-1]
+        g += max(d, 0)
+        l += max(-d, 0)
+    if l == 0:
+        return 100
+    rs = (g/n) / (l/n)
+    return 100 - (100 / (1 + rs))
 
-    state["confidence"] = confidence
-    return direction, confidence
+def core_strategy():
+    m15 = get_klines("15min")
+    h1 = get_klines("1hour")
 
+    if len(m15) < 60 or len(h1) < 220:
+        return None, 0.0
 
+    ema50 = ema(m15, 50)
+    ema200 = ema(h1, 200)
+    r = rsi(m15)
+
+    last = m15[-1]
+
+    # ✅ LONG
+    if last > ema50 > ema200 and r < 70:
+        return "long", 0.8
+
+    # ✅ SHORT
+    if last < ema50 < ema200 and r > 30:
+        return "short", 0.8
+
+    return None, 0.0
+
+# =================================================
+# SNAP
+# =================================================
 def snap_signal(m15, h1):
     if h1 == "up" and m15 == "up" and not state["snap"]["long_used"]:
         return "long"
     if h1 == "down" and m15 == "down" and not state["snap"]["short_used"]:
         return "short"
     return None
-
 
 def reset_snap_daily():
     today = time.strftime("%Y-%m-%d")
@@ -158,87 +131,71 @@ def reset_snap_daily():
         }
 
 # =================================================
-# TRADE PLAN
-# =================================================
-TP_CORE = [
-    {"p": 0.004, "close": 0.4},
-    {"p": 0.008, "close": 0.3},
-    {"p": 0.012, "close": 0.3},
-]
-TP_SNAP = [
-    {"p": 0.003, "close": 0.5},
-    {"p": 0.006, "close": 0.5},
-]
-
-SL_CORE = 0.006
-SL_SNAP = 0.004
-
-# =================================================
 # ORDERS
 # =================================================
-def open_order(side, amount):
-    payload = {
+def open_order(side, amount, reduce_only=False):
+    p = {
         "market": SYMBOL,
         "side": side,
         "type": "market",
         "amount": amount,
+        "reduce_only": reduce_only,
         "timestamp": int(time.time() * 1000),
     }
-    payload["signature"] = sign(payload)
-    return requests.post(f"{BASE_URL}/order/put", data=payload).json()
-
+    p["signature"] = sign(p)
+    requests.post(f"{BASE_URL}/order/put", data=p)
 
 def get_position():
-    payload = {"market": SYMBOL, "timestamp": int(time.time() * 1000)}
-    payload["signature"] = sign(payload)
-    try:
-        r = requests.get(f"{BASE_URL}/position/list", params=payload).json()
-        for p in r.get("data", []):
-            if float(p["amount"]) != 0:
-                return {
-                    "side": p["side"],
-                    "amount": float(p["amount"]),
-                    "entry": float(p["avg_entry_price"]),
-                    "pid": p["position_id"],
-                }
-        return None
-    except:
-        return None
+    p = {"market": SYMBOL, "timestamp": int(time.time() * 1000)}
+    p["signature"] = sign(p)
+    r = requests.get(f"{BASE_URL}/position/list", params=p).json()
+    for x in r.get("data", []):
+        if float(x["amount"]) != 0:
+            return {
+                "side": x["side"],
+                "amount": float(x["amount"]),
+                "entry": float(x["avg_entry_price"]),
+                "pid": x["position_id"],
+            }
+    return None
 
-
-def set_sl(pid, sl_price):
-    payload = {
+def set_sl(pid, price):
+    p = {
         "market": SYMBOL,
         "position_id": pid,
-        "stop_loss_price": round(sl_price, 2),
-        "timestamp": int(time.time() * 1000),
+        "stop_loss_price": round(price, 2),
+        "timestamp": int(time.time()*1000)
     }
-    payload["signature"] = sign(payload)
-    requests.post(f"{BASE_URL}/position/set-stop-loss", data=payload)
+    p["signature"] = sign(p)
+    requests.post(f"{BASE_URL}/position/set-stop-loss", data=p)
 
 # =================================================
-# TP MANAGEMENT
+# TRADE MANAGEMENT
 # =================================================
+TP_CORE = [{"p":0.004,"c":0.4},{"p":0.008,"c":0.3},{"p":0.012,"c":0.3}]
+SL_CORE = 0.006
+
 def manage_trade(price, pos):
-    plan = TP_CORE if state["trade"]["type"] == "core" else TP_SNAP
     i = state["trade"]["tp_index"]
-    if i >= len(plan):
+    if i >= len(TP_CORE):
         return
 
     entry = pos["entry"]
     side = pos["side"]
+    t = TP_CORE[i]
 
-    target = entry * (1 + plan[i]["p"]) if side == "buy" else entry * (1 - plan[i]["p"])
-    hit = price >= target if side == "buy" else price <= target
+    target = entry*(1+t["p"]) if side=="buy" else entry*(1-t["p"])
+    hit = price >= target if side=="buy" else price <= target
     if not hit:
         return
 
-    close_amt = round(pos["amount"] * plan[i]["close"], 3)
-    open_order("sell" if side == "buy" else "buy", close_amt)
-    state["trade"]["tp_index"] += 1
+    amt = round(pos["amount"] * t["c"], 3)
+    open_order("sell" if side=="buy" else "buy", amt, reduce_only=True)
 
     if i == 0:
-        set_sl(pos["pid"], entry)  # ✅ BE واقعی
+        set_sl(pos["pid"], entry)  # ✅ BE
+
+    state["trade"]["tp_index"] += 1
 
 # =================================================
 # MAIN LOOP
@@ -246,48 +203,27 @@ def manage_trade(price, pos):
 def trading_loop():
     print("BOT STARTED")
     state["loop_running"] = True
+    set_leverage()  # ✅ REAL LEVERAGE
 
     while True:
         try:
             reset_snap_daily()
 
-            if not price_sync_ok():
-                time.sleep(3)
-                continue
-
             price = get_price()
-            pos = get_position()
             balance = get_balance()
+            pos = get_position()
 
-            if not pos and state["trade"]["type"]:
+            if not pos:
                 state["trade"] = {"type": None, "tp_index": 0}
 
-            m5, m15, h1 = fetch_mtf()
-            direction, conf = compute_confidence(m5, m15, h1)
+            direction, conf = core_strategy()
+            state["confidence"] = conf
 
-            entered = False
-
-            snap_dir = snap_signal(m15, h1)
-            if not pos and snap_dir and not entered:
-                value = balance * POSITION_SIZE_PERCENT * LEVERAGE * 0.5
-                amount = round(value / price, 3)
-                open_order("buy" if snap_dir == "long" else "sell", amount)
-
-                pos = get_position()
-                if pos:
-                    sl = pos["entry"] * (1 - SL_SNAP) if pos["side"] == "buy" else pos["entry"] * (1 + SL_SNAP)
-                    set_sl(pos["pid"], sl)
-
-                state["trade"] = {"type": "snap", "tp_index": 0}
-                state["snap"]["long_used"] |= snap_dir == "long"
-                state["snap"]["short_used"] |= snap_dir == "short"
-                entered = True
-
-            if not pos and direction and conf >= 0.65 and not entered:
+            if not pos and direction and conf >= 0.7:
                 value = balance * POSITION_SIZE_PERCENT * LEVERAGE
                 amount = round(value / price, 3)
-                open_order("buy" if direction == "long" else "sell", amount)
-                state["trade"] = {"type": "core", "tp_index": 0}
+                open_order("buy" if direction=="long" else "sell", amount)
+                state["trade"]["type"] = "core"
 
             pos = get_position()
             if pos:
@@ -305,50 +241,29 @@ def trading_loop():
 @app.get("/status")
 def status():
     return jsonify({
-        "loop": "active" if state["loop_running"] else "stopped",
-        "mtf": state["mtf"],
+        "running": state["loop_running"],
         "confidence": state["confidence"],
-        "snap": state["snap"],
         "cpu": psutil.cpu_percent(),
-        "memory": psutil.virtual_memory().percent
+        "ram": psutil.virtual_memory().percent
     })
 
-
-@app.get("/health")
-def health():
-    return "OK"
-# ================= SIGNAL OUTPUT (ADD TO END OF FILE) =================
-
-@app.route("/signal", methods=["GET"])
-def signal_output():
-    try:
-        pos = get_position()
-
-        # اگر پوزیشن فعال داریم
-        if pos:
-            return {
-                "signal": "ACTIVE",
-                "type": "LONG" if pos["side"] == "long" else "SHORT",
-                "entry": round(pos["entry"], 2),
-                "size": pos["size"],
-                "time": time.strftime("%Y-%m-%d %H:%M")
-            }
-
-        # اگر پوزیشن نداریم
-        return {
-            "signal": "NO ACTIVE TRADE",
-            "time": time.strftime("%Y-%m-%d %H:%M")
-        }
-
-    except Exception as e:
-        return {
-            "signal": "ERROR",
-            "message": str(e)
-        }
+@app.get("/signal")
+def signal():
+    pos = get_position()
+    if not pos:
+        return {"signal": "NONE", "time": time.strftime("%Y-%m-%d %H:%M")}
+    return {
+        "signal": "ACTIVE",
+        "side": pos["side"],
+        "entry": round(pos["entry"], 2),
+        "amount": pos["amount"],
+        "time": time.strftime("%Y-%m-%d %H:%M")
+    }
 
 # =================================================
 # START
 # =================================================
 if __name__ == "__main__":
     threading.Thread(target=trading_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=5000)
+    app.run("0.0.0.0", 5000)
+
