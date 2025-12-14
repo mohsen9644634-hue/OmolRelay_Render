@@ -15,6 +15,7 @@ SPOT_URL = "https://api.coinex.com/v1/market"
 SYMBOL = "BTCUSDT"
 LEVERAGE = 10
 POSITION_SIZE_PERCENT = 0.8
+SL_CORE = 0.006   # ✅ initial SL (0.6%)
 
 # =================================================
 # FLASK
@@ -24,10 +25,9 @@ app = Flask(__name__)
 state = {
     "loop_running": False,
     "position": None,
-    "entry_price": None,
     "confidence": 0.0,
-    "mtf": {"m15": None, "h1": None},
     "trade": {"type": None, "tp_index": 0},
+    "entry_lock": False,
     "snap": {"long_used": False, "short_used": False, "last_reset_day": None}
 }
 
@@ -60,7 +60,7 @@ def get_balance():
     r = requests.get(f"{BASE_URL}/asset/query", params=p).json()
     return float(r["data"]["available"])
 
-def get_klines(tf, limit=200):
+def get_klines(tf, limit=300):
     r = requests.get(
         f"{SPOT_URL}/kline",
         params={"market": SYMBOL, "type": tf, "limit": limit}
@@ -68,67 +68,61 @@ def get_klines(tf, limit=200):
     return [float(c[2]) for c in r.get("data", [])]
 
 # =================================================
-# INDICATORS (NEW STRATEGY)
+# INDICATORS (FIXED)
 # =================================================
 def ema(data, n):
+    if len(data) < n:
+        return None
     k = 2 / (n + 1)
-    e = data[0]
-    for v in data[1:]:
+    e = sum(data[:n]) / n  # ✅ SMA init
+    for v in data[n:]:
         e = v * k + e * (1 - k)
     return e
 
 def rsi(data, n=14):
-    g = l = 0
-    for i in range(-n, 0):
+    if len(data) < n + 1:
+        return 50
+    gains, losses = [], []
+    for i in range(1, len(data)):
         d = data[i] - data[i-1]
-        g += max(d, 0)
-        l += max(-d, 0)
-    if l == 0:
+        gains.append(max(d, 0))
+        losses.append(abs(min(d, 0)))
+
+    avg_gain = sum(gains[:n]) / n
+    avg_loss = sum(losses[:n]) / n
+
+    for i in range(n, len(gains)):
+        avg_gain = (avg_gain*(n-1) + gains[i]) / n
+        avg_loss = (avg_loss*(n-1) + losses[i]) / n
+
+    if avg_loss == 0:
         return 100
-    rs = (g/n) / (l/n)
+    rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+# =================================================
+# STRATEGY
+# =================================================
 def core_strategy():
     m15 = get_klines("15min")
     h1 = get_klines("1hour")
-
-    if len(m15) < 60 or len(h1) < 220:
-        return None, 0.0
 
     ema50 = ema(m15, 50)
     ema200 = ema(h1, 200)
     r = rsi(m15)
 
+    if not ema50 or not ema200:
+        return None, 0.0
+
     last = m15[-1]
 
-    # ✅ LONG
-    if last > ema50 > ema200 and r < 70:
+    if last > ema50 and h1[-1] > ema200 and r < 70:
         return "long", 0.8
 
-    # ✅ SHORT
-    if last < ema50 < ema200 and r > 30:
+    if last < ema50 and h1[-1] < ema200 and r > 30:
         return "short", 0.8
 
     return None, 0.0
-
-# =================================================
-# SNAP
-# =================================================
-def snap_signal(m15, h1):
-    if h1 == "up" and m15 == "up" and not state["snap"]["long_used"]:
-        return "long"
-    if h1 == "down" and m15 == "down" and not state["snap"]["short_used"]:
-        return "short"
-    return None
-
-def reset_snap_daily():
-    today = time.strftime("%Y-%m-%d")
-    if state["snap"]["last_reset_day"] != today:
-        state["snap"] = {
-            "long_used": False,
-            "short_used": False,
-            "last_reset_day": today
-        }
 
 # =================================================
 # ORDERS
@@ -173,7 +167,13 @@ def set_sl(pid, price):
 # TRADE MANAGEMENT
 # =================================================
 TP_CORE = [{"p":0.004,"c":0.4},{"p":0.008,"c":0.3},{"p":0.012,"c":0.3}]
-SL_CORE = 0.006
+
+def set_initial_sl(pos):
+    if pos["side"] == "buy":
+        sl = pos["entry"] * (1 - SL_CORE)
+    else:
+        sl = pos["entry"] * (1 + SL_CORE)
+    set_sl(pos["pid"], sl)
 
 def manage_trade(price, pos):
     i = state["trade"]["tp_index"]
@@ -189,7 +189,7 @@ def manage_trade(price, pos):
     if not hit:
         return
 
-    amt = round(pos["amount"] * t["c"], 3)
+    amt = max(round(pos["amount"] * t["c"], 3), 0.001)
     open_order("sell" if side=="buy" else "buy", amt, reduce_only=True)
 
     if i == 0:
@@ -203,36 +203,39 @@ def manage_trade(price, pos):
 def trading_loop():
     print("BOT STARTED")
     state["loop_running"] = True
-    set_leverage()  # ✅ REAL LEVERAGE
+    set_leverage()
 
     while True:
         try:
-            reset_snap_daily()
-
             price = get_price()
             balance = get_balance()
             pos = get_position()
 
             if not pos:
                 state["trade"] = {"type": None, "tp_index": 0}
+                state["entry_lock"] = False
 
             direction, conf = core_strategy()
             state["confidence"] = conf
 
-            if not pos and direction and conf >= 0.7:
+            if not pos and direction and conf >= 0.7 and not state["entry_lock"]:
+                state["entry_lock"] = True
                 value = balance * POSITION_SIZE_PERCENT * LEVERAGE
-                amount = round(value / price, 3)
+                amount = max(round(value / price, 3), 0.001)
                 open_order("buy" if direction=="long" else "sell", amount)
                 state["trade"]["type"] = "core"
 
             pos = get_position()
             if pos:
+                if state["trade"]["tp_index"] == 0:
+                    set_initial_sl(pos)
                 manage_trade(price, pos)
 
             time.sleep(3)
 
         except Exception as e:
             print("ERROR:", e)
+            state["entry_lock"] = False
             time.sleep(5)
 
 # =================================================
