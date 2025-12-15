@@ -1,5 +1,7 @@
 import time, hmac, hashlib, threading, requests, psutil, os
 from flask import Flask, jsonify
+from collections import deque
+from datetime import datetime, timedelta
 
 # =================================================
 # CONFIG
@@ -14,8 +16,11 @@ SPOT_URL = "https://api.coinex.com/v1/market"
 
 SYMBOL = "BTCUSDT"
 LEVERAGE = 10
-POSITION_SIZE_PERCENT = 0.25   # ✅ FIXED
+POSITION_SIZE_PERCENT = 0.25
 SL_CORE = 0.006
+
+SIGNAL_HISTORY_DAYS = 5
+signal_history = deque()
 
 # =================================================
 # FLASK
@@ -26,10 +31,30 @@ state = {
     "loop_running": False,
     "position": None,
     "confidence": 0.0,
-    "trade": {"type": None, "tp_index": 0, "sl_set": False},  # ✅ FIXED
+    "trade": {"type": None, "tp_index": 0, "sl_set": False},
     "entry_lock": False,
     "snap": {"long_used": False, "short_used": False, "last_reset_day": None}
 }
+
+# =================================================
+# SIGNAL LOGGER
+# =================================================
+def log_signal(signal_type, side=None, price=None, confidence=None):
+    signal_history.append({
+        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "signal": signal_type,
+        "side": side,
+        "price": price,
+        "confidence": confidence
+    })
+
+    cutoff = datetime.utcnow() - timedelta(days=SIGNAL_HISTORY_DAYS)
+    while signal_history:
+        t = datetime.strptime(signal_history[0]["time"], "%Y-%m-%d %H:%M:%S")
+        if t < cutoff:
+            signal_history.popleft()
+        else:
+            break
 
 # =================================================
 # AUTH
@@ -57,10 +82,7 @@ def get_price():
 def get_balance():
     p = {"asset": "USDT", "timestamp": int(time.time() * 1000)}
     p["signature"] = sign(p)
-    r = requests.get(
-        f"{BASE_URL}/asset/query",
-        params=p
-    ).json()
+    r = requests.get(f"{BASE_URL}/asset/query", params=p).json()
     return float(r["data"]["available"])
 
 def get_klines(tf, limit=300):
@@ -179,7 +201,7 @@ def set_initial_sl(pos):
     set_sl(pos["pid"], sl)
 
 def manage_trade(price):
-    pos = get_position()      # ✅ FIXED
+    pos = get_position()
     if not pos:
         return
 
@@ -225,20 +247,25 @@ def trading_loop():
             direction, conf = core_strategy()
             state["confidence"] = conf
 
+            if not pos:
+                log_signal("NONE", confidence=conf)
+
             if not pos and direction and conf >= 0.7 and not state["entry_lock"]:
                 state["entry_lock"] = True
                 value = balance * POSITION_SIZE_PERCENT * LEVERAGE
                 amount = max(round(value / price, 3), 0.001)
                 open_order("buy" if direction=="long" else "sell", amount)
+
+                log_signal("ENTRY", side=direction.upper(), price=price, confidence=conf)
                 state["trade"]["type"] = "core"
 
                 time.sleep(1)
-                if not get_position():          # ✅ FIXED
+                if not get_position():
                     state["entry_lock"] = False
 
             pos = get_position()
             if pos and not state["trade"]["sl_set"]:
-                set_initial_sl(pos)             # ✅ FIXED
+                set_initial_sl(pos)
                 state["trade"]["sl_set"] = True
 
             if pos:
@@ -274,6 +301,14 @@ def signal():
         "entry": round(pos["entry"], 2),
         "amount": pos["amount"],
         "time": time.strftime("%Y-%m-%d %H:%M")
+    }
+
+@app.get("/signals")
+def signals():
+    return {
+        "days": SIGNAL_HISTORY_DAYS,
+        "count": len(signal_history),
+        "signals": list(signal_history)
     }
 
 # =================================================
