@@ -14,8 +14,8 @@ SPOT_URL = "https://api.coinex.com/v1/market"
 
 SYMBOL = "BTCUSDT"
 LEVERAGE = 10
-POSITION_SIZE_PERCENT = 0.8
-SL_CORE = 0.006   # ✅ initial SL (0.6%)
+POSITION_SIZE_PERCENT = 0.25   # ✅ FIXED
+SL_CORE = 0.006
 
 # =================================================
 # FLASK
@@ -26,7 +26,7 @@ state = {
     "loop_running": False,
     "position": None,
     "confidence": 0.0,
-    "trade": {"type": None, "tp_index": 0},
+    "trade": {"type": None, "tp_index": 0, "sl_set": False},  # ✅ FIXED
     "entry_lock": False,
     "snap": {"long_used": False, "short_used": False, "last_reset_day": None}
 }
@@ -68,13 +68,13 @@ def get_klines(tf, limit=300):
     return [float(c[2]) for c in r.get("data", [])]
 
 # =================================================
-# INDICATORS (FIXED)
+# INDICATORS
 # =================================================
 def ema(data, n):
     if len(data) < n:
         return None
     k = 2 / (n + 1)
-    e = sum(data[:n]) / n  # ✅ SMA init
+    e = sum(data[:n]) / n
     for v in data[n:]:
         e = v * k + e * (1 - k)
     return e
@@ -175,7 +175,11 @@ def set_initial_sl(pos):
         sl = pos["entry"] * (1 + SL_CORE)
     set_sl(pos["pid"], sl)
 
-def manage_trade(price, pos):
+def manage_trade(price):
+    pos = get_position()      # ✅ FIXED
+    if not pos:
+        return
+
     i = state["trade"]["tp_index"]
     if i >= len(TP_CORE):
         return
@@ -193,7 +197,7 @@ def manage_trade(price, pos):
     open_order("sell" if side=="buy" else "buy", amt, reduce_only=True)
 
     if i == 0:
-        set_sl(pos["pid"], entry)  # ✅ BE
+        set_sl(pos["pid"], entry)
 
     state["trade"]["tp_index"] += 1
 
@@ -212,7 +216,7 @@ def trading_loop():
             pos = get_position()
 
             if not pos:
-                state["trade"] = {"type": None, "tp_index": 0}
+                state["trade"] = {"type": None, "tp_index": 0, "sl_set": False}
                 state["entry_lock"] = False
 
             direction, conf = core_strategy()
@@ -225,11 +229,17 @@ def trading_loop():
                 open_order("buy" if direction=="long" else "sell", amount)
                 state["trade"]["type"] = "core"
 
+                time.sleep(1)
+                if not get_position():          # ✅ FIXED
+                    state["entry_lock"] = False
+
             pos = get_position()
+            if pos and not state["trade"]["sl_set"]:
+                set_initial_sl(pos)             # ✅ FIXED
+                state["trade"]["sl_set"] = True
+
             if pos:
-                if state["trade"]["tp_index"] == 0:
-                    set_initial_sl(pos)
-                manage_trade(price, pos)
+                manage_trade(price)
 
             time.sleep(3)
 
