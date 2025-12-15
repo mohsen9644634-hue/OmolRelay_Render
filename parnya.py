@@ -57,12 +57,12 @@ def get_price():
 def get_balance():
     p = {"asset": "USDT", "timestamp": int(time.time() * 1000)}
     p["signature"] = sign(p)
-    r = requests.get(f"{BASE_URL}/asset/query", params=p).json()
-    return float(r["data"]["available"])
-
-def get_klines(tf, limit=300):
+    r = requests.get(f"{BASE_URL}/asset/query", params=p).json(
+        return float(r["data"]["available"])
+        
+ def get_klines(tf, limit=300):
     r = requests.get(
-        f"{SPOT_URL}/kline",
+        f"{BASE_URL}/market/kline",
         params={"market": SYMBOL, "type": tf, "limit": limit}
     ).json()
     return [float(c[2]) for c in r.get("data", [])]
