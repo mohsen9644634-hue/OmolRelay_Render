@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 # CONFIGURATION
 # =================================================
 class Config:
+    # حتما کلیدهای خود را در Environment Variables ست کنید یا اینجا جایگزین کنید
     API_KEY = os.getenv("COINEX_API_KEY", "YOUR_KEY")
     API_SECRET = os.getenv("COINEX_API_SECRET", "YOUR_SECRET")
     SYMBOL = "BTCUSDT"
@@ -14,7 +15,7 @@ class Config:
     POSITION_SIZE_PCT = 0.25
     SL_CORE = 0.006  
     TP_TARGETS = [
-        {"p": 0.004, "c": 0.4},  # پله اول: ریسک‌فری و ذخیره سود
+        {"p": 0.004, "c": 0.4},  # پله اول: ذخیره سود و ریسک‌فری
         {"p": 0.008, "c": 0.3},
         {"p": 0.012, "c": 0.3}
     ]
@@ -71,7 +72,11 @@ class CoinexBot:
                 resp = self.session.get(url, params=params, headers=headers, timeout=10)
             else:
                 resp = self.session.post(url, json=params, headers=headers, timeout=10)
-            return resp.json()
+            
+            res_json = resp.json()
+            if res_json.get('code') != 0:
+                print(f"⚠️ Coinex Warning: {res_json.get('message')}")
+            return res_json
         except Exception as e:
             print(f"❌ API Error: {e}")
             return None
@@ -84,7 +89,6 @@ class CoinexBot:
             "margin_mode": "isolated"
         }, auth=True)
 
-    # --- Indicators ---
     def ema(self, data, n):
         if len(data) < n: return None
         k = 2 / (n + 1)
@@ -104,7 +108,6 @@ class CoinexBot:
             avg_loss = (avg_loss * (n - 1) + losses[i]) / n
         return 100 - (100 / (1 + (avg_gain/avg_loss))) if avg_loss != 0 else 100
 
-    # --- Trading Logic ---
     def check_strategy(self):
         m15_data = self.request("GET", "/futures/market/kline", {"market": Config.SYMBOL, "period": "15min", "limit": "100"})
         h1_data = self.request("GET", "/futures/market/kline", {"market": Config.SYMBOL, "period": "1hour", "limit": "250"})
@@ -130,7 +133,7 @@ class CoinexBot:
         return None, 0.1
 
     def trading_loop(self):
-        print("🚀 BOT STARTED - PROTECTING YOUR CAPITAL")
+        print("🤖 BOT STARTED - STABLE INCOME MODE")
         state["loop_running"] = True
         self.set_leverage()
         
@@ -142,57 +145,60 @@ class CoinexBot:
                 pos_resp = self.request("GET", "/futures/pending-position", {"market": Config.SYMBOL}, auth=True)
                 pos = pos_resp['data'][0] if (pos_resp and pos_resp.get('data')) else None
 
-                # 1. اسکن برای ورود
+                # 1. SCAN FOR ENTRY
                 if not pos or float(pos['amount']) == 0:
                     state["tp_index"] = 0
                     state["sl_set"] = False
                     
                     side, conf = self.check_strategy()
                     state["confidence"] = conf
-                    log_signal("SCANNING", side=side.upper() if side else None, confidence=conf)
                     
                     if side and not state["entry_lock"]:
                         balance_resp = self.request("GET", "/assets/futures/balance", auth=True)
-                        balance = float(balance_resp['data'][0]['available']) if balance_resp else 0
+                        balance = float(balance_resp['data'][0]['available']) if (balance_resp and 'data' in balance_resp) else 0
+                        
                         amount = (balance * Config.POSITION_SIZE_PCT * Config.LEVERAGE) / price
                         
-                        print(f"🔥 Entry Signal: {side.upper()}")
-                        self.request("POST", "/futures/order", {
+                        print(f"🔥 Signal: {side.upper()} | Conf: {conf}")
+                        order = self.request("POST", "/futures/order", {
                             "market": Config.SYMBOL, "side": "buy" if side == "long" else "sell",
                             "type": "market", "amount": str(round(amount, 4))
                         }, auth=True)
-                        log_signal("ENTRY", side.upper(), price, conf)
-                        state["entry_lock"] = True
+                        
+                        if order and order.get('code') == 0:
+                            log_signal("ENTRY", side.upper(), price, conf)
+                            state["entry_lock"] = True
                 
-                # 2. مدیریت پوزیشن باز
+                # 2. MANAGE POSITION
                 else:
                     state["entry_lock"] = False
                     entry = float(pos['avg_entry_price'])
+                    side = pos['side'] # 'buy' for long, 'sell' for short
                     
                     if not state["sl_set"]:
-                        sl_price = entry * (1 - Config.SL_CORE) if pos['side'] == 'buy' else entry * (1 + Config.SL_CORE)
+                        sl_price = entry * (1 - Config.SL_CORE) if side == 'buy' else entry * (1 + Config.SL_CORE)
                         self.request("POST", "/futures/edit-position-stop-loss", {
                             "market": Config.SYMBOL, "stop_loss_price": str(round(sl_price, 2))
                         }, auth=True)
                         state["sl_set"] = True
-                        print(f"🛡️ Initial SL Set at {round(sl_price, 2)}")
+                        print(f"🛡️ SL Set at {round(sl_price, 2)}")
 
                     idx = state["tp_index"]
                     if idx < len(Config.TP_TARGETS):
                         target = Config.TP_TARGETS[idx]
-                        tp_price = entry * (1 + target['p']) if pos['side'] == 'buy' else entry * (1 - target['p'])
-                        hit = (price >= tp_price) if pos['side'] == 'buy' else (price <= tp_price)
+                        tp_price = entry * (1 + target['p']) if side == 'buy' else entry * (1 - target['p'])
+                        hit = (price >= tp_price) if side == 'buy' else (price <= tp_price)
                         
                         if hit:
-                            print(f"🎯 TP{idx+1} Hit! Saving Profit...")
+                            print(f"🎯 TP{idx+1} Reached!")
                             close_amt = float(pos['amount']) * target['c']
                             self.request("POST", "/futures/order", {
-                                "market": Config.SYMBOL, "side": "sell" if pos['side'] == 'buy' else "buy",
+                                "market": Config.SYMBOL, "side": "sell" if side == 'buy' else "buy",
                                 "type": "market", "amount": str(round(close_amt, 4)), "reduce_only": True
                             }, auth=True)
                             
                             if idx == 0: # ریسک‌فری بعد از پله اول
-                                print("🛡️ Risk-Free Active: Moving SL to Entry")
+                                print("🛡️ Risk-Free: Moving SL to Entry")
                                 self.request("POST", "/futures/edit-position-stop-loss", {
                                     "market": Config.SYMBOL, "stop_loss_price": str(round(entry, 2))
                                 }, auth=True)
@@ -204,7 +210,7 @@ class CoinexBot:
                 time.sleep(15)
 
 # =================================================
-# FLASK INTERFACE
+# WEB INTERFACE
 # =================================================
 bot = CoinexBot()
 app = Flask(__name__)
@@ -212,8 +218,10 @@ app = Flask(__name__)
 @app.get("/status")
 def status():
     return jsonify({
-        "running": state["loop_running"], "confidence": state["confidence"],
-        "cpu": psutil.cpu_percent(), "signals": list(signal_history)
+        "bot_running": state["loop_running"],
+        "current_confidence": state["confidence"],
+        "system_cpu": psutil.cpu_percent(),
+        "history": list(signal_history)
     })
 
 if __name__ == "__main__":
